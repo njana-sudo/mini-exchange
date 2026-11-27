@@ -7,8 +7,12 @@
 #include "Types.hpp"
 
 #include <gtest/gtest.h>
+#include <algorithm>
+#include <iostream>
 #include <limits>
 #include <memory>
+#include <random>
+#include <vector>
 
 namespace {
 
@@ -20,6 +24,10 @@ protected:
         ex.registerTrader(std::make_unique<RetailTrader>("Asha"));
         ex.registerTrader(std::make_unique<RetailTrader>("Ravi"));
         ex.registerTrader(std::make_unique<InstitutionalTrader>("AlphaFund"));
+    }
+
+    void TearDown() override {
+        ex.book().checkInvariants();
     }
 };
 
@@ -427,6 +435,355 @@ TEST(TraderReportWindowTest, ExcludesTradesOlderThanRequestedMonths) {
     TraderReport allTime = timedEx.buildTraderReport("AlphaFund", 0);
     EXPECT_EQ(allTime.totalBought(), 20);
     EXPECT_DOUBLE_EQ(allTime.avgBuyPrice(), 150.00);
+}
+
+// ======================= 7. Randomized differential test vs naive O(N) book =======================
+
+struct NaiveOrder {
+    OrderId     id;
+    std::string trader;
+    Side        side;
+    Quantity    qty;
+    Price       price;
+    uint64_t    seq;
+};
+
+struct NaiveStop {
+    OrderId     id;
+    std::string trader;
+    Side        side;
+    Quantity    qty;
+    Price       trigger;
+    Price       limit;
+    uint64_t    seq;
+};
+
+struct NaiveTrade {
+    OrderId     buyId;
+    OrderId     sellId;
+    std::string buyer;
+    std::string seller;
+    Price       price;
+    Quantity    qty;
+};
+
+// Simple O(N) linear-scan reference model with zero maps/lists/iterators.
+class NaiveExchange {
+public:
+    StpMode                 stpMode;
+    OrderId                 nextId = 1;
+    uint64_t                seq    = 1;
+    std::vector<NaiveOrder> resting;
+    std::vector<NaiveStop>  stops;
+    std::vector<NaiveTrade> trades;
+    std::optional<Price>    lastTradePrice;
+
+    explicit NaiveExchange(StpMode mode) : stpMode(mode) {}
+
+    static Quantity maxOrderSizeFor(const std::string& trader) {
+        return (trader == "AlphaFund") ? 10000 : 100;
+    }
+
+    bool matchIncoming(OrderId id, const std::string& trader, Side side,
+                       Quantity& qty, bool isMarket, Price limitPrice) {
+        while (qty > 0) {
+            int bestIdx = -1;
+            for (int i = 0; i < static_cast<int>(resting.size()); ++i) {
+                const auto& r = resting[static_cast<size_t>(i)];
+                if (r.side == side) continue;
+                if (!isMarket) {
+                    bool crosses = (side == Side::BUY) ? (limitPrice >= r.price)
+                                                       : (limitPrice <= r.price);
+                    if (!crosses) continue;
+                }
+                if (bestIdx == -1) {
+                    bestIdx = i;
+                } else {
+                    const auto& b = resting[static_cast<size_t>(bestIdx)];
+                    bool betterPrice = (side == Side::BUY) ? (r.price < b.price)
+                                                           : (r.price > b.price);
+                    if (betterPrice || (r.price == b.price && r.seq < b.seq)) {
+                        bestIdx = i;
+                    }
+                }
+            }
+            if (bestIdx == -1) break;
+
+            auto& opp = resting[static_cast<size_t>(bestIdx)];
+            if (opp.trader == trader) {
+                if (stpMode == StpMode::CANCEL_OLDEST) {
+                    resting.erase(resting.begin() + bestIdx);
+                    continue;
+                }
+                return true;  // CANCEL_NEWEST
+            }
+
+            Quantity fill = std::min(qty, opp.qty);
+            qty     -= fill;
+            opp.qty -= fill;
+
+            OrderId     buyId  = (side == Side::BUY) ? id : opp.id;
+            OrderId     sellId = (side == Side::SELL) ? id : opp.id;
+            std::string buyer  = (side == Side::BUY) ? trader : opp.trader;
+            std::string seller = (side == Side::SELL) ? trader : opp.trader;
+            trades.push_back({buyId, sellId, buyer, seller, opp.price, fill});
+            lastTradePrice = opp.price;
+
+            if (opp.qty == 0) {
+                resting.erase(resting.begin() + bestIdx);
+            }
+        }
+        return false;
+    }
+
+    void checkStops() {
+        if (!lastTradePrice.has_value()) return;
+        while (true) {
+            Price lp = *lastTradePrice;
+            int bestIdx = -1;
+            for (int i = 0; i < static_cast<int>(stops.size()); ++i) {
+                const auto& s = stops[static_cast<size_t>(i)];
+                if (s.side != Side::SELL || s.trigger < lp) continue;
+                if (bestIdx == -1) {
+                    bestIdx = i;
+                } else {
+                    const auto& b = stops[static_cast<size_t>(bestIdx)];
+                    if (s.trigger > b.trigger || (s.trigger == b.trigger && s.seq < b.seq))
+                        bestIdx = i;
+                }
+            }
+            if (bestIdx == -1) {
+                for (int i = 0; i < static_cast<int>(stops.size()); ++i) {
+                    const auto& s = stops[static_cast<size_t>(i)];
+                    if (s.side != Side::BUY || s.trigger > lp) continue;
+                    if (bestIdx == -1) {
+                        bestIdx = i;
+                    } else {
+                        const auto& b = stops[static_cast<size_t>(bestIdx)];
+                        if (s.trigger < b.trigger || (s.trigger == b.trigger && s.seq < b.seq))
+                            bestIdx = i;
+                    }
+                }
+            }
+            if (bestIdx == -1) break;
+
+            NaiveStop s = stops[static_cast<size_t>(bestIdx)];
+            stops.erase(stops.begin() + bestIdx);
+            bool stpCancelled = matchIncoming(s.id, s.trader, s.side, s.qty, false, s.limit);
+            if (!stpCancelled && s.qty > 0) {
+                resting.push_back({s.id, s.trader, s.side, s.qty, s.limit, seq++});
+            }
+        }
+    }
+
+    OrderId placeLimit(const std::string& trader, Side side, Quantity qty, double rupees) {
+        if (qty <= 0 || qty > maxOrderSizeFor(trader)) throw InvalidOrderException("bad qty");
+        Price p = validateAndConvertPrice(rupees);
+        OrderId id = nextId++;
+        size_t before = trades.size();
+        bool stp = matchIncoming(id, trader, side, qty, false, p);
+        if (!stp && qty > 0) resting.push_back({id, trader, side, qty, p, seq++});
+        if (trades.size() > before) checkStops();
+        return id;
+    }
+
+    OrderId placeMarket(const std::string& trader, Side side, Quantity qty) {
+        if (qty <= 0 || qty > maxOrderSizeFor(trader)) throw InvalidOrderException("bad qty");
+        OrderId id = nextId++;
+        size_t before = trades.size();
+        matchIncoming(id, trader, side, qty, true, 0);
+        if (trades.size() > before) checkStops();
+        return id;
+    }
+
+    OrderId placeStop(const std::string& trader, Side side, Quantity qty,
+                      double trigRupees, double limRupees) {
+        if (qty <= 0 || qty > maxOrderSizeFor(trader)) throw InvalidOrderException("bad qty");
+        Price trig = validateAndConvertPrice(trigRupees);
+        Price lim  = validateAndConvertPrice(limRupees);
+        if (lastTradePrice.has_value()) {
+            bool crossed = (side == Side::SELL) ? (*lastTradePrice <= trig)
+                                                : (*lastTradePrice >= trig);
+            if (crossed) throw InvalidOrderException("crossed stop");
+        }
+        OrderId id = nextId++;
+        stops.push_back({id, trader, side, qty, trig, lim, seq++});
+        return id;
+    }
+
+    void cancel(const std::string& trader, OrderId id) {
+        for (size_t i = 0; i < resting.size(); ++i) {
+            if (resting[i].id == id) {
+                if (resting[i].trader != trader) throw InvalidOrderException("owner");
+                resting.erase(resting.begin() + static_cast<std::ptrdiff_t>(i));
+                return;
+            }
+        }
+        for (size_t i = 0; i < stops.size(); ++i) {
+            if (stops[i].id == id) {
+                if (stops[i].trader != trader) throw InvalidOrderException("owner");
+                stops.erase(stops.begin() + static_cast<std::ptrdiff_t>(i));
+                return;
+            }
+        }
+        throw InvalidOrderException("not found");
+    }
+
+    void modify(const std::string& trader, OrderId id, Quantity newQty, double newRupees) {
+        if (newQty <= 0 || newQty > maxOrderSizeFor(trader)) throw InvalidOrderException("bad qty");
+        Price newPrice = validateAndConvertPrice(newRupees);
+        for (size_t i = 0; i < stops.size(); ++i) {
+            if (stops[i].id == id) throw InvalidOrderException("pending stop");
+        }
+        for (size_t i = 0; i < resting.size(); ++i) {
+            if (resting[i].id == id) {
+                if (resting[i].trader != trader) throw InvalidOrderException("owner");
+                if (newPrice == resting[i].price && newQty <= resting[i].qty) {
+                    resting[i].qty = newQty;
+                    return;
+                }
+                NaiveOrder ord = resting[i];
+                resting.erase(resting.begin() + static_cast<std::ptrdiff_t>(i));
+                ord.qty   = newQty;
+                ord.price = newPrice;
+                size_t before = trades.size();
+                bool stp = matchIncoming(ord.id, ord.trader, ord.side, ord.qty, false, ord.price);
+                if (!stp && ord.qty > 0) {
+                    ord.seq = seq++;
+                    resting.push_back(ord);
+                }
+                if (trades.size() > before) checkStops();
+                return;
+            }
+        }
+        throw InvalidOrderException("not found");
+    }
+
+    size_t openOrderCount() const { return resting.size() + stops.size(); }
+
+    std::optional<Price> bestBid() const {
+        std::optional<Price> best;
+        for (const auto& o : resting)
+            if (o.side == Side::BUY && (!best || o.price > *best)) best = o.price;
+        return best;
+    }
+
+    std::optional<Price> bestAsk() const {
+        std::optional<Price> best;
+        for (const auto& o : resting)
+            if (o.side == Side::SELL && (!best || o.price < *best)) best = o.price;
+        return best;
+    }
+};
+
+void runDifferentialTrace(uint32_t seed, StpMode mode, int steps) {
+    // Silence demo stdout during randomized fuzzing; restore via RAII on exit
+    struct CoutSilencer {
+        std::streambuf* prev;
+        CoutSilencer() : prev(std::cout.rdbuf(nullptr)) {}
+        ~CoutSilencer() { std::cout.rdbuf(prev); }
+    } silencer;
+
+    std::time_t fakeNow = 1700000000;
+    Exchange      ex(mode, [&fakeNow]() { return fakeNow; });
+    NaiveExchange ref(mode);
+
+    ex.registerTrader(std::make_unique<RetailTrader>("Asha"));
+    ex.registerTrader(std::make_unique<RetailTrader>("Ravi"));
+    ex.registerTrader(std::make_unique<InstitutionalTrader>("AlphaFund"));
+
+    const std::vector<std::string> traders = {"Asha", "Ravi", "AlphaFund"};
+    std::mt19937 rng(seed);
+    std::uniform_int_distribution<int> opDist(0, 9);
+    std::uniform_int_distribution<int> traderDist(0, 2);
+    std::uniform_int_distribution<int> sideDist(0, 1);
+    std::uniform_int_distribution<int> qtyDist(1, 30);
+    std::uniform_int_distribution<int> priceTicksDist(90, 110);  // whole rupees 90..110
+
+    std::vector<OrderId> seenIds;
+
+    for (int step = 0; step < steps; ++step) {
+        ++fakeNow;
+        int op = opDist(rng);
+        const std::string& trader = traders[static_cast<size_t>(traderDist(rng))];
+        Side side = (sideDist(rng) == 0) ? Side::BUY : Side::SELL;
+        Quantity qty = qtyDist(rng);
+        double price = static_cast<double>(priceTicksDist(rng));
+
+        bool exThrew  = false;
+        bool refThrew = false;
+
+        if (op <= 3) {  // 40% limit
+            OrderId eid = 0, rid = 0;
+            try { eid = ex.placeOrder(trader, side, qty, price); } catch (const InvalidOrderException&) { exThrew = true; }
+            try { rid = ref.placeLimit(trader, side, qty, price); } catch (const InvalidOrderException&) { refThrew = true; }
+            ASSERT_EQ(exThrew, refThrew) << "seed=" << seed << " step=" << step;
+            if (!exThrew) {
+                ASSERT_EQ(eid, rid);
+                seenIds.push_back(eid);
+            }
+        } else if (op == 4) {  // 10% market
+            OrderId eid = 0, rid = 0;
+            try { eid = ex.placeOrder(trader, side, qty); } catch (const InvalidOrderException&) { exThrew = true; }
+            try { rid = ref.placeMarket(trader, side, qty); } catch (const InvalidOrderException&) { refThrew = true; }
+            ASSERT_EQ(exThrew, refThrew) << "seed=" << seed << " step=" << step;
+            if (!exThrew) {
+                ASSERT_EQ(eid, rid);
+                seenIds.push_back(eid);
+            }
+        } else if (op <= 6) {  // 20% stop-loss (valid + intentionally crossed triggers)
+            double trig  = static_cast<double>(priceTicksDist(rng));
+            double limit = static_cast<double>(priceTicksDist(rng));
+            OrderId eid = 0, rid = 0;
+            try { eid = ex.placeOrder(trader, side, qty, trig, limit); } catch (const InvalidOrderException&) { exThrew = true; }
+            try { rid = ref.placeStop(trader, side, qty, trig, limit); } catch (const InvalidOrderException&) { refThrew = true; }
+            ASSERT_EQ(exThrew, refThrew) << "seed=" << seed << " step=" << step;
+            if (!exThrew) {
+                ASSERT_EQ(eid, rid);
+                seenIds.push_back(eid);
+            }
+        } else if (op == 7 && !seenIds.empty()) {  // 10% cancel (valid or stale/wrong-owner)
+            std::uniform_int_distribution<size_t> idDist(0, seenIds.size() - 1);
+            OrderId target = seenIds[idDist(rng)];
+            try { ex.cancelOrder(trader, target); } catch (const InvalidOrderException&) { exThrew = true; }
+            try { ref.cancel(trader, target); } catch (const InvalidOrderException&) { refThrew = true; }
+            ASSERT_EQ(exThrew, refThrew) << "seed=" << seed << " step=" << step;
+        } else if (!seenIds.empty()) {  // 20% modify
+            std::uniform_int_distribution<size_t> idDist(0, seenIds.size() - 1);
+            OrderId target = seenIds[idDist(rng)];
+            try { ex.modifyOrder(trader, target, qty, price); } catch (const InvalidOrderException&) { exThrew = true; }
+            try { ref.modify(trader, target, qty, price); } catch (const InvalidOrderException&) { refThrew = true; }
+            ASSERT_EQ(exThrew, refThrew) << "seed=" << seed << " step=" << step;
+        }
+
+        // Verify structural invariants and exact state equivalence after EVERY step
+        ex.book().checkInvariants();
+        ASSERT_EQ(ex.book().openOrderCount(), ref.openOrderCount()) << "step=" << step;
+        ASSERT_EQ(ex.book().bestBid(),        ref.bestBid())        << "step=" << step;
+        ASSERT_EQ(ex.book().bestAsk(),        ref.bestAsk())        << "step=" << step;
+        ASSERT_EQ(ex.book().lastTradePrice(), ref.lastTradePrice)   << "step=" << step;
+
+        const auto& exTrades = ex.book().trades();
+        ASSERT_EQ(exTrades.size(), ref.trades.size()) << "step=" << step;
+        for (size_t i = 0; i < exTrades.size(); ++i) {
+            ASSERT_EQ(exTrades[i].buyOrderId(),  ref.trades[i].buyId)  << "trade " << i;
+            ASSERT_EQ(exTrades[i].sellOrderId(), ref.trades[i].sellId) << "trade " << i;
+            ASSERT_EQ(exTrades[i].buyer(),       ref.trades[i].buyer)  << "trade " << i;
+            ASSERT_EQ(exTrades[i].seller(),      ref.trades[i].seller) << "trade " << i;
+            ASSERT_EQ(exTrades[i].price(),       ref.trades[i].price)  << "trade " << i;
+            ASSERT_EQ(exTrades[i].quantity(),    ref.trades[i].qty)    << "trade " << i;
+        }
+    }
+}
+
+TEST(DifferentialTest, MatchesNaiveBookInCancelOldestMode) {
+    runDifferentialTrace(42u,   StpMode::CANCEL_OLDEST, 1000);
+    runDifferentialTrace(1337u, StpMode::CANCEL_OLDEST, 1000);
+}
+
+TEST(DifferentialTest, MatchesNaiveBookInCancelNewestMode) {
+    runDifferentialTrace(7u,    StpMode::CANCEL_NEWEST, 1000);
+    runDifferentialTrace(2026u, StpMode::CANCEL_NEWEST, 1000);
 }
 
 }  // namespace

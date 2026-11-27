@@ -83,5 +83,8 @@ public:
     std::optional<Price>       lastTradePrice() const { return lastTradePrice_; }
     const std::vector<Trade>&  trades() const { return trades_; }
 
+    // Verifies all structural invariants (throws std::logic_error even in Release builds).
+    void checkInvariants() const;
+
     void print() const;
 };

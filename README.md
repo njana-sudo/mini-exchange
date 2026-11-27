@@ -2,9 +2,9 @@
 
 A limit order book and matching engine written in C++17.
 
-Orders are matched by **price-time priority** — the standard used by real exchanges. The engine handles limit orders, market orders, and stop-loss orders; records every trade with a timestamp; and reports each trader's realized P&L on demand.
+Orders are matched by **price-time priority** using exact integer ticks (`int64_t`), supporting limit, market, and stop-loss orders, $O(1)$ ID-indexed cancellation and priority-aware modification, configurable self-trade prevention, and per-trader realized P&L reports.
 
-The goal: build an engine that is **measurably fast, provably correct, and transparent** — addressing real pain points in platforms like Zerodha (outages under load, unverifiable SL execution, no real-time analytics visibility).
+*(Note: Platforms like Zerodha are brokers that route retail orders to exchanges such as NSE/BSE. This project models the **exchange-side matching core** alongside broker-like risk limits, stop-loss orders, STP, and P&L reporting so we can study correctness, determinism, and tail latency end-to-end.)*
 
 ---
 
@@ -12,47 +12,34 @@ The goal: build an engine that is **measurably fast, provably correct, and trans
 
 ```
   ┌─────────────────────────────────────────────────────────┐
-  │                      C++ Engine                         │
+  │                 C++ Matching Engine                     │
   │                                                         │
-  │   Client / Simulator ──► Exchange ──► OrderBook         │
-  │                               │          │              │
-  │                               │          ▼              │
-  │                               │       Trade log         │
-  │                               │    (append-only, replay)│
-  │                               │          │              │
-  │                               ▼          ▼              │
-  │                         TraderReport  Benchmark         │
-  │                         (cold path)   (p50/p99 μs)      │
-  └────────────────────┬────────────────────────────────────┘
-                       │  WebSocket / TCP
-          ┌────────────┴────────────┐
-          │                         │
-          ▼                         ▼
-  ┌───────────────┐       ┌──────────────────────┐
-  │ React / Live  │       │  Python analytics     │
-  │ order book UI │       │  P&L curves, latency  │
-  │ (hackathon    │       │  histograms, market   │
-  │  demo layer)  │       │  simulator            │
-  └───────────────┘       └──────────────────────┘
+  │   Client / Tests ──► Exchange ──► OrderBook (hot path)  │
+  │                         │            │                  │
+  │                         │            ▼                  │
+  │                         │       Trade history           │
+  │                         │            │                  │
+  │                         ▼            ▼                  │
+  │                   TraderReport   [Planned: replay log,  │
+  │                   (cold path)     benchmark, gateway]   │
+  └─────────────────────────────────────────────────────────┘
 ```
 
-**Hot path** (`OrderBook`): receives an order, walks the opposite side by price then time, fills, parks remainder, checks stop-loss cascade. This loop is what gets benchmarked.
-
-**Cold path** (`TraderReport`): scans the trade log on demand — never touches the hot path.
-
-**Live layer**: after every trade, the engine pushes a small JSON event over WebSocket. The dashboard re-renders in under 16 ms. Judges see numbers change with every order.
+- **Hot path (`OrderBook`)**: receives validated orders, matches across integer tick levels by price then FIFO time, updates $O(1)$ ID index, and triggers stop-loss cascades.
+- **Cold path (`TraderReport`)**: aggregates trades for a trader over a configurable window and computes average buy/sell prices, net position, and realized P&L.
 
 ---
 
-## Features
+## Implemented features
 
-- **Price-time priority matching** — best price wins; ties broken by submission time
-- **Limit, market, and stop-loss orders** — SL orders sit pending until the last traded price crosses the trigger; cascades handled
-- **O(1) order cancellation and modification** — cancel resting or pending SL orders by ID with ownership checks; in-place quantity cuts preserve FIFO time priority while price/size increases re-enter matching
-- **Self-trade prevention (STP)** — configurable `CANCEL_OLDEST` (cancel passive resting order) or `CANCEL_NEWEST` (cancel incoming remainder) prevents a trader from matching against themselves or crossing the book
-- **Trade history with timestamps** — every execution recorded in an append-only log
-- **Per-trader P&L reports** — quantity, price, value, net position, realized P&L over *N* months
-- **Deterministic replay** — reprocessing the order log produces bit-identical trades (provable correctness)
+- **Integer tick prices (`int64_t`)** — 1 tick = ₹0.01; floats are validated (including overflow bounds before rounding) and converted at the API boundary only
+- **Price-time priority matching** — best price wins; FIFO order within each price level
+- **Limit, market, and stop-loss orders** — pending stops are indexed by trigger price (`std::map` descending for sell stops, ascending for buy stops) and cascade cleanly when trades move the last traded price
+- **$O(1)$ cancel & priority-aware modify** — stored map + list iterators allow constant-time removal; same-price quantity cuts preserve queue position while price/size increases re-enter matching
+- **Self-trade prevention (STP)** — `CANCEL_OLDEST` (cancel resting order) or `CANCEL_NEWEST` (cancel incoming remainder)
+- **Deterministic timestamps & non-burning IDs** — injected `Clock` and per-exchange `uint64_t` order IDs assigned only after validation succeeds
+- **Per-trader P&L reports** — buy/sell history, average prices, net position, and realized P&L over the last *N* months
+- **Unit & differential tests** — GoogleTest suite verifying invariants (`OrderBook::checkInvariants()`) and randomized parity against a naive $O(N)$ reference book
 
 ---
 
@@ -60,73 +47,99 @@ The goal: build an engine that is **measurably fast, provably correct, and trans
 
 ```
 mini-exchange/
-├── CMakeLists.txt
+├── CMakeLists.txt          # CMake build (LTO, warnings, Sanitizers, GoogleTest)
 ├── include/
-│   ├── Types.hpp           # Side enum, formatDate, InvalidOrderException
+│   ├── Types.hpp           # OrderId/Quantity/Price ticks, Clock, StpMode, validation
 │   ├── Order.hpp           # Order (abstract), LimitOrder, MarketOrder, StopLossOrder
-│   ├── Trade.hpp           # Immutable trade record
+│   ├── Trade.hpp           # Immutable trade record with deterministic timestamp
 │   ├── Trader.hpp          # Trader (abstract), RetailTrader, InstitutionalTrader
 │   ├── TraderReport.hpp    # Cold-path analytics
-│   ├── OrderBook.hpp       # Hot-path matching engine
+│   ├── OrderBook.hpp       # Matching engine + invariant checker
 │   └── Exchange.hpp        # Top-level facade
-└── src/
-    ├── Order.cpp
-    ├── Trade.cpp
-    ├── TraderReport.cpp
-    ├── OrderBook.cpp
-    ├── Exchange.cpp
-    └── main.cpp
+├── src/
+│   ├── Order.cpp
+│   ├── Trade.cpp
+│   ├── TraderReport.cpp
+│   ├── OrderBook.cpp
+│   ├── Exchange.cpp
+│   └── main.cpp            # Demo CLI
+├── tests/
+│   └── exchange_test.cpp   # Unit tests + randomized differential tests
+└── bench/                  # (Planned) paced latency & throughput benchmark harness
 ```
 
 ---
 
-## Build
+## Build & test
 
 **Requirements:** CMake ≥ 3.16, g++ or clang++ (C++17), Ninja
 
 ```bash
+# Release build (LTO enabled) + run unit & differential tests
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build
+ctest --test-dir build --output-on-failure
 ./build/exchange        # Windows: .\build\exchange.exe
 ```
 
-**Debug build:**
+**Offline build (skip fetching GoogleTest):**
 ```bash
-cmake -S . -B build-dbg -G Ninja -DCMAKE_BUILD_TYPE=Debug
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF
+cmake --build build
+```
+
+**Debug + Sanitizers (ASan + UBSan on Linux/Clang; `_GLIBCXX_DEBUG` iterator checks fallback on MinGW):**
+```bash
+cmake -S . -B build-dbg -G Ninja -DCMAKE_BUILD_TYPE=Debug -DENABLE_SANITIZERS=ON
 cmake --build build-dbg
+ctest --test-dir build-dbg --output-on-failure
 ```
 
 ---
 
-## Roadmap
+## Known limitations (current stage)
+
+- **Single symbol** — one `OrderBook` instance per `Exchange`; multi-symbol partitioning comes in Phase 3
+- **In-memory only** — no disk persistence or WAL replay yet (Phase 2 next step)
+- **Window-local P&L** — `TraderReport` computes cost basis from trades inside the requested window; a continuous per-trader ledger is planned
+- **Continuous matching only** — no opening/closing auction or IOC/FOK/post-only time-in-force flags yet
+
+---
+
+## Benchmark results
+
+*(To be measured in Phase 3 on a dedicated harness — engine throughput and p50/p99/p99.9 latency reported separately from any network/UI layer.)*
+
+| Configuration | Throughput (orders/sec) | p50 (μs) | p99 (μs) | p99.9 (μs) |
+|---|---|---|---|---|
+| Baseline (`std::map` + `std::list` + `shared_ptr`) | *TBD* | *TBD* | *TBD* | *TBD* |
+| Optimized (arena pool + flat ladder + `ctz64()`) | *TBD* | *TBD* | *TBD* | *TBD* |
+
+---
+
+## Planned roadmap
 
 Each step is reviewed for correctness, speed, and behaviour under load before the next begins.
 
 ### Phase 1 — Make it correct
-- [x] **Integer tick prices** — replace `double` map keys with `int64_t` ticks; eliminates floating-point comparison bugs and makes the order book a true integer structure. Real exchanges do not use floats.
-- [x] **Order cancellation and modification** — `O(1)` lookup by order ID via a parallel `unordered_map` with iterator-stable `std::list` price queues; ownership-checked and priority-aware.
-- [x] **Self-trade prevention** — configurable `CANCEL_OLDEST` / `CANCEL_NEWEST` modes; prevents self-matches and crossed books without adding overhead to non-crossing orders.
+- [x] **Integer tick prices** — `int64_t` ticks with boundary range/overflow validation
+- [x] **Order cancellation and modification** — $O(1)$ cancel via stored map + list iterators; priority-preserving quantity cuts
+- [x] **Self-trade prevention** — `CANCEL_OLDEST` / `CANCEL_NEWEST` modes preventing self-matches and crossed books
 
 ### Phase 2 — Prove it correct
-- [x] **Unit tests** (Google Test via CMake `FetchContent`) — 19 tests covering integer tick drift, price-time priority, partial fills, SL cascade, O(1) cancel/modify, STP modes, and P&L reports.
-- [ ] **Append-only order log** — every submitted order written to a binary log before matching. Replaying the log must produce bit-identical trades (determinism test run in CI).
+- [x] **Unit & differential tests** (GoogleTest) — edge cases, `checkInvariants()`, and randomized differential testing against a naive $O(N)$ reference book
+- [ ] **Continuous trader ledger & append-only order log** — track integer-tick realized P&L continuously across windows; log every input command to disk and replay for bit-identical trades
 
 ### Phase 3 — Make it fast
-- [ ] **Decouple I/O & POD hot-path structs** — remove `std::cout` and heap-allocated `std::string`s from `OrderBook` / `Trade`; use integer `TraderId` (`uint32_t`) on the hot path and keep string names at the cold boundary.
-- [ ] **Benchmark harness** — pace orders at fixed arrival rates (avoiding coordinated omission) plus adversarial cancel/replace burst traces; report throughput (orders/sec) and tail latency (**p50, p99, p99.9** in microseconds) on this machine.
-- [ ] **Arena pool & flat price levels** — replace `std::shared_ptr` + `std::list` + `std::map` with a contiguous order pool using `uint32_t` intrusive FIFO indices, an open-addressed/flat ID lookup table, and a flat price array with bitmask (`__builtin_ctzll`) for $O(1)$ best-bid/ask jumps.
-- [ ] **Multiple symbols & sharded threading** — one lock-free single-threaded `OrderBook` shard per symbol, fed by cache-line-aligned (`alignas(64)`) SPSC/MPSC ring buffers with acquire/release memory ordering.
+- [ ] **Decouple I/O & POD hot-path structs** — replace `std::cout` with an event listener, use integer `TraderId` (`uint32_t`) and result codes instead of exceptions on the hot path
+- [ ] **Benchmark harness (`bench/`)** — paced arrival rates (avoiding coordinated omission) + cancel/replace burst traces reporting throughput and **p50 / p99 / p99.9**
+- [ ] **Arena pool & flat price ladder** — contiguous order pool with `uint32_t` intrusive FIFO indices, flat ID table, and flat price array with portable `ctz64()` bitmap (`__builtin_ctzll` / `_BitScanForward64` / `std::countr_zero`)
+- [ ] **Multiple symbols & sharded threading** — one single-threaded `OrderBook` shard per symbol fed by `alignas(64)` lock-free SPSC/MPSC ring buffers
 
 ### Phase 4 — Make it a server
-- [ ] **TCP gateway** — accept order submissions and return trade confirmations over a socket (Boost.Asio / `epoll` on Linux).
-- [ ] **Batched WebSocket event stream** — coalesce trade/book updates into batched JSON frames (avoiding per-trade wakeups under burst load) and measure end-to-end match-to-browser latency on the dashboard.
+- [ ] **TCP gateway** — accept order submissions and return trade confirmations over a socket
+- [ ] **Batched WebSocket event stream** — coalesce market data / trade updates into batched frames for downstream visualization
 
-### Phase 5 — Make it visual (hackathon demo layer)
-- [ ] **Python market simulator** — generates realistic synthetic order flow (Poisson arrivals, Gaussian price drift) at configurable rates; connects to the TCP gateway. Used to stress-test the engine and populate the dashboard with live data.
-- [ ] **Live dashboard** (React + recharts or plain canvas) — panels updating in real time with every trade event:
-  - Order book depth (bid/ask ladder)
-  - Trade tape (last N executions)
-  - Per-trader P&L curve
-  - Throughput gauge (orders/sec)
-  - Latency histogram (p50 / p99)
-- [ ] **Stress demo** — at the hackathon, run the Python simulator at 10 k orders/sec and show the dashboard updating live. Show the latency histogram staying flat. Show the replay test passing after the run.
+### Phase 5 — Make it visual (demo layer)
+- [ ] **Python market simulator** — synthetic order flow (Poisson arrivals, price drift) driving the TCP gateway
+- [ ] **Live visualization dashboard** — real-time order book ladder, trade tape, P&L curve, and latency histogram (explicitly decoupled from engine matching latency)

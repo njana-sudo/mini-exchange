@@ -1,7 +1,11 @@
-build/
+build*/
 *.o
 *.exe
 *.out
 *.a
 a.out
 .vscode/
+.cache/
+.idea/
+compile_commands.json
+perf.data*

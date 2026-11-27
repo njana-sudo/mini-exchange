@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <iostream>
 #include <iterator>
+#include <stdexcept>
 
 namespace {
 template <typename Map, typename QueueIt>
@@ -290,6 +291,67 @@ std::optional<Price> OrderBook::bestBid() const {
 std::optional<Price> OrderBook::bestAsk() const {
     if (asks_.empty()) return std::nullopt;
     return asks_.begin()->first;
+}
+
+// ======================= checkInvariants =======================
+
+void OrderBook::checkInvariants() const {
+    if (!bids_.empty() && !asks_.empty() && bids_.begin()->first >= asks_.begin()->first) {
+        throw std::logic_error("Invariant violated: crossed book");
+    }
+
+    size_t indexedCount = 0;
+
+    auto verifyLimitSide = [&](const auto& book, Bucket expectedBucket, Side expectedSide) {
+        for (const auto& [lvlPrice, queue] : book) {
+            if (queue.empty())
+                throw std::logic_error("Invariant violated: empty limit price level");
+            for (auto qIt = queue.begin(); qIt != queue.end(); ++qIt) {
+                const auto& o = *qIt;
+                if (!o || o->quantity() <= 0 || o->isMarket())
+                    throw std::logic_error("Invariant violated: invalid resting order");
+                if (o->side() != expectedSide || o->price() != lvlPrice)
+                    throw std::logic_error("Invariant violated: resting order side/price mismatch");
+                auto idxIt = orderIndex_.find(o->id());
+                if (idxIt == orderIndex_.end() ||
+                    idxIt->second.bucket != expectedBucket ||
+                    idxIt->second.queueIt != qIt) {
+                    throw std::logic_error("Invariant violated: orderIndex_ out of sync with limit book");
+                }
+                ++indexedCount;
+            }
+        }
+    };
+
+    auto verifyStopSide = [&](const auto& book, Bucket expectedBucket, Side expectedSide) {
+        for (const auto& [trigPrice, queue] : book) {
+            if (queue.empty())
+                throw std::logic_error("Invariant violated: empty stop trigger level");
+            for (auto qIt = queue.begin(); qIt != queue.end(); ++qIt) {
+                const auto& sl = *qIt;
+                if (!sl || sl->quantity() <= 0 || sl->isTriggered())
+                    throw std::logic_error("Invariant violated: invalid pending stop-loss");
+                if (sl->side() != expectedSide || sl->triggerPrice() != trigPrice)
+                    throw std::logic_error("Invariant violated: stop-loss side/trigger mismatch");
+                auto idxIt = orderIndex_.find(sl->id());
+                if (idxIt == orderIndex_.end() ||
+                    idxIt->second.bucket != expectedBucket ||
+                    idxIt->second.stopQueueIt != qIt) {
+                    throw std::logic_error("Invariant violated: orderIndex_ out of sync with stop book");
+                }
+                ++indexedCount;
+            }
+        }
+    };
+
+    verifyLimitSide(bids_,      Bucket::BID,       Side::BUY);
+    verifyLimitSide(asks_,      Bucket::ASK,       Side::SELL);
+    verifyStopSide(stopBuys_,   Bucket::STOP_BUY,  Side::BUY);
+    verifyStopSide(stopSells_,  Bucket::STOP_SELL, Side::SELL);
+
+    if (indexedCount != orderIndex_.size()) {
+        throw std::logic_error("Invariant violated: orphan entries in orderIndex_");
+    }
 }
 
 // ======================= print =======================
