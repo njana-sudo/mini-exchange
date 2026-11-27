@@ -7,6 +7,7 @@ A small order-matching engine that demonstrates core object-oriented programming
 - Orders are matched by **price-time priority**: best price first, and the oldest order first at the same price.
 - **Stop-loss orders** stay pending until the last traded price crosses a trigger level, then activate as limit orders — just like Zerodha's SL orders.  Triggered stop-losses can cascade (one trigger causes trades that trigger another).
 - Unmatched limit orders rest in the order book; trades are recorded and printed.
+- **Trader reports** (`traderReport(name, months)`) show the quantity, price, and value of all stocks bought and sold by a user over the last *N* months, along with net position and realized P&L.
 - Invalid orders (bad price, unknown trader, size above the trader's limit) are rejected with exceptions.
 
 ## Class relationships
@@ -79,9 +80,33 @@ classDiagram
     class Trade {
         -int buyOrderId_
         -int sellOrderId_
+        -string buyer_
+        -string seller_
         -double price_
         -int quantity_
+        -time_t timestamp_
+        +buyOrderId() int
+        +sellOrderId() int
+        +buyer() string
+        +seller() string
         +price() double
+        +quantity() int
+        +timestamp() time_t
+    }
+
+    class TraderReport {
+        -string name_
+        -int months_
+        -vector~Entry~ buys_
+        -vector~Entry~ sells_
+        +addBuy(int, double, int, time_t)
+        +addSell(int, double, int, time_t)
+        +totalBought() int
+        +totalSold() int
+        +avgBuyPrice() double
+        +avgSellPrice() double
+        +netPosition() int
+        +realizedPnL() double
     }
 
     class OrderBook {
@@ -102,6 +127,7 @@ classDiagram
         -validate(string, int)
         +registerTrader(Trader)
         +placeOrder() ×3 overloads
+        +traderReport(string, int)
         +listTraders()
         +book() OrderBook
     }
@@ -119,6 +145,7 @@ classDiagram
 
     Exchange *-- OrderBook : composition
     Exchange *-- Trader : composition
+    Exchange ..> TraderReport : creates
     OrderBook *-- Trade : composition
     OrderBook o-- Order : aggregation
     OrderBook o-- StopLossOrder : aggregation
@@ -127,17 +154,18 @@ classDiagram
 ## OOP concepts used
 | Concept | Where |
 |---|---|
-| Encapsulation | `Order`, `Trade`, `OrderBook`: private data with const getters |
+| Encapsulation | `Order`, `Trade`, `OrderBook`, `TraderReport`: private data with const getters |
 | Abstraction | Abstract classes `Order` and `Trader` (pure virtual functions) |
 | Inheritance | `LimitOrder`/`MarketOrder`/`StopLossOrder` from `Order`; `RetailTrader`/`InstitutionalTrader` from `Trader` |
 | Polymorphism (runtime) | Virtual functions called via base pointers (`type()`, `info()`, `maxOrderSize()`) |
 | Polymorphism (compile time) | Function overloading (`placeOrder` × 3), operator overloading (`<<`), templates (`match`, `printAll`) |
 | Constructors / destructors | Constructor overloading, initializer lists, virtual destructors |
 | Static members | `Order::nextId` |
-| Friend functions | `operator<<` for `Order` and `Trade` |
-| Composition | `Exchange` owns an `OrderBook` and its traders |
+| Friend functions | `operator<<` for `Order`, `Trade`, and `TraderReport` |
+| Composition | `Exchange` owns an `OrderBook`, its traders, and builds `TraderReport`s |
 | Exception handling | `InvalidOrderException` |
 | Dynamic cast | `dynamic_pointer_cast` to identify `StopLossOrder` at runtime |
+| Nested struct | `Entry` inside `TraderReport` groups trade line-item fields |
 
 ## Build and run
 ```bash

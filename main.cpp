@@ -10,11 +10,13 @@
 //   [CONSTRUCTORS]   constructor overloading, initializer lists, virtual destructors
 //   [STATIC]         static member shared by all objects
 //   [FRIEND]         friend function for operator<<
-//   [COMPOSITION]    Exchange "has an" OrderBook and "has" Traders
+//   [COMPOSITION]    Exchange "has an" OrderBook, "has" Traders, "builds" TraderReports
 //   [EXCEPTIONS]     custom exception class
 //   [DYNAMIC_CAST]   dynamic_pointer_cast to identify order subtypes at runtime
+//   [NESTED_STRUCT]  Entry inside TraderReport groups related data
 
 #include <algorithm>
+#include <ctime>
 #include <deque>
 #include <functional>
 #include <iomanip>
@@ -29,6 +31,13 @@
 enum class Side { BUY, SELL };
 
 inline std::string toString(Side s) { return s == Side::BUY ? "BUY" : "SELL"; }
+
+// helper: format a time_t as "DD-Mon-YYYY"
+inline std::string formatDate(std::time_t t) {
+    char buf[20];
+    std::strftime(buf, sizeof(buf), "%d-%b-%Y", std::localtime(&t));
+    return buf;
+}
 
 // [EXCEPTIONS] [INHERITANCE] custom exception derived from a standard one
 class InvalidOrderException : public std::runtime_error {
@@ -153,21 +162,142 @@ class Trade {
 private:
     int buyOrderId_;
     int sellOrderId_;
+    std::string buyer_;
+    std::string seller_;
     double price_;
     int quantity_;
+    std::time_t timestamp_;
 
 public:
-    Trade() : buyOrderId_(0), sellOrderId_(0), price_(0.0), quantity_(0) {}   // [CONSTRUCTORS] default
-    Trade(int buyId, int sellId, double price, int qty)                        // [CONSTRUCTORS] parameterized
-        : buyOrderId_(buyId), sellOrderId_(sellId), price_(price), quantity_(qty) {}
+    Trade() : buyOrderId_(0), sellOrderId_(0), price_(0.0), quantity_(0),
+              timestamp_(std::time(nullptr)) {}                                    // [CONSTRUCTORS] default
+    Trade(int buyId, int sellId, const std::string& buyer, const std::string& seller,
+          double price, int qty, std::time_t ts = std::time(nullptr))              // [CONSTRUCTORS] parameterized
+        : buyOrderId_(buyId), sellOrderId_(sellId), buyer_(buyer), seller_(seller),
+          price_(price), quantity_(qty), timestamp_(ts) {}
 
-    double price() const { return price_; }   // needed by OrderBook to check stop-loss triggers
+    // [ENCAPSULATION] const getters
+    int buyOrderId()            const { return buyOrderId_; }
+    int sellOrderId()           const { return sellOrderId_; }
+    const std::string& buyer()  const { return buyer_; }
+    const std::string& seller() const { return seller_; }
+    double price()              const { return price_; }
+    int quantity()              const { return quantity_; }
+    std::time_t timestamp()     const { return timestamp_; }
 
     friend std::ostream& operator<<(std::ostream& os, const Trade& t) {
-        return os << "TRADE buy#" << t.buyOrderId_ << " sell#" << t.sellOrderId_ << " " << t.quantity_
-                  << " @ " << std::fixed << std::setprecision(2) << t.price_;
+        return os << "TRADE buy#" << t.buyOrderId_ << " sell#" << t.sellOrderId_
+                  << " " << t.quantity_ << " @ " << std::fixed << std::setprecision(2)
+                  << t.price_ << "  [" << formatDate(t.timestamp_) << "]";
     }
 };
+
+// ======================= Trader Report =======================
+
+// [ENCAPSULATION] [COMPOSITION] aggregates a trader's buy/sell history and computes P&L
+class TraderReport {
+private:
+    std::string name_;
+    int months_;
+
+    // [NESTED_STRUCT] groups related fields for a single trade entry
+    struct Entry {
+        int orderId;
+        double price;
+        int quantity;
+        std::time_t timestamp;
+        double value() const { return price * quantity; }
+    };
+
+    std::vector<Entry> buys_;
+    std::vector<Entry> sells_;
+
+public:
+    TraderReport(const std::string& name, int months) : name_(name), months_(months) {}
+
+    void addBuy(int orderId, double price, int qty, std::time_t ts) {
+        buys_.push_back({orderId, price, qty, ts});
+    }
+    void addSell(int orderId, double price, int qty, std::time_t ts) {
+        sells_.push_back({orderId, price, qty, ts});
+    }
+
+    bool empty() const { return buys_.empty() && sells_.empty(); }
+
+    int totalBought() const {
+        int t = 0; for (const auto& e : buys_) t += e.quantity; return t;
+    }
+    double totalBuyCost() const {
+        double t = 0; for (const auto& e : buys_) t += e.value(); return t;
+    }
+    int totalSold() const {
+        int t = 0; for (const auto& e : sells_) t += e.quantity; return t;
+    }
+    double totalSellRevenue() const {
+        double t = 0; for (const auto& e : sells_) t += e.value(); return t;
+    }
+    double avgBuyPrice()  const { return totalBought() > 0 ? totalBuyCost() / totalBought() : 0.0; }
+    double avgSellPrice() const { return totalSold() > 0 ? totalSellRevenue() / totalSold() : 0.0; }
+    int    netPosition()  const { return totalBought() - totalSold(); }
+
+    // realized P&L using average-cost method (same as Zerodha)
+    double realizedPnL() const {
+        int matched = std::min(totalBought(), totalSold());
+        if (matched == 0) return 0.0;
+        return matched * (avgSellPrice() - avgBuyPrice());
+    }
+
+    // [FRIEND] formatted report output
+    friend std::ostream& operator<<(std::ostream& os, const TraderReport& r);
+};
+
+std::ostream& operator<<(std::ostream& os, const TraderReport& r) {
+    std::string period = r.months_ > 0 ? "last " + std::to_string(r.months_) + " month(s)"
+                                       : "all time";
+    os << "\n====== Trade Report: " << r.name_ << " (" << period << ") ======\n";
+
+    if (r.empty()) {
+        os << "  No trades found.\n";
+        os << "================================================\n";
+        return os;
+    }
+
+    os << std::fixed << std::setprecision(2);
+
+    if (!r.buys_.empty()) {
+        os << "PURCHASES\n";
+        for (const auto& e : r.buys_)
+            os << "  order #" << e.orderId << "  " << e.quantity << " shares @ "
+               << e.price << " = " << e.value() << "  [" << formatDate(e.timestamp) << "]\n";
+        os << "  Total: " << r.totalBought() << " shares | Cost: " << r.totalBuyCost()
+           << " | Avg price: " << r.avgBuyPrice() << "\n\n";
+    }
+
+    if (!r.sells_.empty()) {
+        os << "SALES\n";
+        for (const auto& e : r.sells_)
+            os << "  order #" << e.orderId << "  " << e.quantity << " shares @ "
+               << e.price << " = " << e.value() << "  [" << formatDate(e.timestamp) << "]\n";
+        os << "  Total: " << r.totalSold() << " shares | Revenue: " << r.totalSellRevenue()
+           << " | Avg price: " << r.avgSellPrice() << "\n\n";
+    }
+
+    os << "Net position: ";
+    int net = r.netPosition();
+    if (net > 0)       os << "+" << net << " shares (long)";
+    else if (net < 0)  os << net << " shares (short)";
+    else               os << "0 (flat)";
+
+    os << "\nRealized P&L: ";
+    double pnl = r.realizedPnL();
+    if (pnl >= 0) os << "+";
+    os << pnl;
+    int matched = std::min(r.totalBought(), r.totalSold());
+    if (matched > 0) os << "  (on " << matched << " matched shares, avg-cost method)";
+
+    os << "\n================================================\n";
+    return os;
+}
 
 // ======================= Trader hierarchy =======================
 
@@ -227,7 +357,8 @@ private:
 
             const Order& buy = (incoming->side() == Side::BUY) ? *incoming : *resting;
             const Order& sell = (incoming->side() == Side::SELL) ? *incoming : *resting;
-            trades_.emplace_back(buy.id(), sell.id(), levelPrice, qty);
+            trades_.emplace_back(buy.id(), sell.id(), buy.trader(), sell.trader(),
+                                 levelPrice, qty);
 
             if (resting->isFilled()) queue.pop_front();
             if (queue.empty()) opposite.erase(level);
@@ -361,6 +492,30 @@ public:
         book_.submit(order);
     }
 
+    // [COMPOSITION] builds a TraderReport by scanning the trade history
+    void traderReport(const std::string& name, int months = 0) const {
+        auto it = traders_.find(name);
+        if (it == traders_.end()) {
+            std::cout << "Unknown trader: " << name << "\n";
+            return;
+        }
+
+        std::time_t now = std::time(nullptr);
+        std::time_t cutoff = (months > 0)
+            ? now - static_cast<std::time_t>(months) * 30 * 24 * 3600
+            : 0;
+
+        TraderReport report(name, months);
+        for (const auto& trade : book_.trades()) {
+            if (trade.timestamp() < cutoff) continue;
+            if (trade.buyer() == name)
+                report.addBuy(trade.buyOrderId(), trade.price(), trade.quantity(), trade.timestamp());
+            if (trade.seller() == name)
+                report.addSell(trade.sellOrderId(), trade.price(), trade.quantity(), trade.timestamp());
+        }
+        std::cout << report;
+    }
+
     void listTraders() const {
         std::cout << "Registered traders\n";
         for (const auto& [name, trader] : traders_)                                  // [POLYMORPHISM] runtime dispatch
@@ -408,6 +563,11 @@ int main() {
     exchange.placeOrder("AlphaFund", Side::BUY, 10);
     exchange.book().print();
 
+    // AlphaFund takes profit by selling 30 shares to Ravi at 103.00
+    std::cout << "\n";
+    exchange.placeOrder("Ravi", Side::BUY, 30, 103.00);
+    exchange.placeOrder("AlphaFund", Side::SELL, 30, 103.00);
+
     // Error handling: exceeds the retail limit, and an invalid price
     std::cout << "\n";
     try {
@@ -423,5 +583,11 @@ int main() {
 
     std::cout << "\n";
     printAll("Trades executed", exchange.book().trades());
+
+    // Trader reports: view each participant's buys, sells, and realized P&L
+    exchange.traderReport("AlphaFund", 1);   // last 1 month
+    exchange.traderReport("Asha", 1);
+    exchange.traderReport("Ravi", 1);
+
     return 0;
 }
