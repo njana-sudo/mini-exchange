@@ -1,13 +1,26 @@
 #pragma once
-// Types.hpp - shared enums, helpers, and exceptions used across the project
+// Types.hpp - shared enums, fixed-point price helpers, ID/quantity types,
+//             clock abstraction, and exceptions.
 
 #include <cmath>
 #include <cstdint>
 #include <ctime>
+#include <functional>
 #include <stdexcept>
 #include <string>
 
-// ======================= Side =======================
+// ======================= Core Types =======================
+
+using OrderId  = uint64_t;
+using Quantity = int64_t;
+using Price    = int64_t;   // integer ticks; always positive for a valid price
+using Clock    = std::function<std::time_t()>;
+
+inline Clock systemClock() {
+    return []() { return std::time(nullptr); };
+}
+
+// ======================= Enums =======================
 
 enum class Side { BUY, SELL };
 
@@ -22,21 +35,11 @@ enum class StpMode {
 
 // ======================= Integer price (tick) system =======================
 //
-// Real exchanges never use floating-point prices.  Floating-point comparison
-// as map keys causes silent correctness bugs (two prices that look equal may
-// differ by an ULP and land in separate levels).
-//
-// We represent every price as an integer number of *ticks*.
-//   1 tick  = ₹0.01  (1 paisa — the standard NSE equity tick)
-//   ₹101.50 = 10150 ticks
-//
-// All internal arithmetic is done in ticks (int64_t).
-// Conversion to/from human-readable rupees happens only at the boundary
-// (user input in Exchange::placeOrder, display in operator<<).
+// Real exchanges never use floating-point prices as book keys.
+// 1 tick = ₹0.01 (1 paisa).  ₹101.50 = 10150 ticks.
 
-using Price = int64_t;                      // ticks; always positive for a valid price
-
-constexpr int64_t TICKS_PER_RUPEE = 100;   // 1 tick = ₹0.01
+constexpr int64_t TICKS_PER_RUPEE = 100;
+constexpr double  MAX_RUPEES      = 1e9;   // ₹10^9 = 10^11 ticks; safe from int64 overflow
 
 // Convert user-supplied rupee amount to ticks (rounds to nearest tick).
 inline Price to_ticks(double rupees) {
@@ -56,10 +59,14 @@ public:
     explicit InvalidOrderException(const std::string& msg) : std::runtime_error(msg) {}
 };
 
-// Validate user-supplied rupee price and convert to positive integer ticks.
+// Validate user-supplied rupee price BEFORE llround to prevent signed overflow UB.
 inline Price validateAndConvertPrice(double rupees, const char* label = "Price") {
     if (!std::isfinite(rupees))
         throw InvalidOrderException(std::string(label) + " must be finite");
+    if (rupees <= 0.0)
+        throw InvalidOrderException(std::string(label) + " must be positive");
+    if (rupees > MAX_RUPEES)
+        throw InvalidOrderException(std::string(label) + " exceeds maximum allowed");
     Price ticks = to_ticks(rupees);
     if (ticks <= 0)
         throw InvalidOrderException(std::string(label) + " must be positive");
@@ -71,6 +78,12 @@ inline Price validateAndConvertPrice(double rupees, const char* label = "Price")
 // format a time_t as "DD-Mon-YYYY"
 inline std::string formatDate(std::time_t t) {
     char buf[20];
-    std::strftime(buf, sizeof(buf), "%d-%b-%Y", std::localtime(&t));
+    std::tm tmBuf{};
+#ifdef _WIN32
+    localtime_s(&tmBuf, &t);
+#else
+    localtime_r(&t, &tmBuf);
+#endif
+    std::strftime(buf, sizeof(buf), "%d-%b-%Y", &tmBuf);
     return buf;
 }

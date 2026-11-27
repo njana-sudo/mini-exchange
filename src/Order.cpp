@@ -8,14 +8,12 @@
 
 // ======================= Order =======================
 
-int Order::nextId = 1;
-
-Order::Order(const std::string& trader, Side side, int qty)
-    : id_(nextId++), trader_(trader), side_(side), quantity_(qty) {
+Order::Order(OrderId id, const std::string& trader, Side side, Quantity qty)
+    : id_(id), trader_(trader), side_(side), quantity_(qty) {
     if (qty <= 0) throw InvalidOrderException("Quantity must be positive");
 }
 
-void Order::setQuantity(int qty) {
+void Order::setQuantity(Quantity qty) {
     if (qty <= 0) throw InvalidOrderException("Quantity must be positive");
     quantity_ = qty;
 }
@@ -36,8 +34,8 @@ std::ostream& operator<<(std::ostream& os, const Order& o) {
 
 // ======================= LimitOrder =======================
 
-LimitOrder::LimitOrder(const std::string& trader, Side side, int qty, double price)
-    : Order(trader, side, qty), price_(validateAndConvertPrice(price, "Price")) {}
+LimitOrder::LimitOrder(OrderId id, const std::string& trader, Side side, Quantity qty, double price)
+    : Order(id, trader, side, qty), price_(validateAndConvertPrice(price, "Price")) {}
 
 void LimitOrder::setPrice(Price newPrice) {
     if (newPrice <= 0) throw InvalidOrderException("Price must be positive");
@@ -46,14 +44,14 @@ void LimitOrder::setPrice(Price newPrice) {
 
 // ======================= MarketOrder =======================
 
-MarketOrder::MarketOrder(const std::string& trader, Side side, int qty)
-    : Order(trader, side, qty) {}
+MarketOrder::MarketOrder(OrderId id, const std::string& trader, Side side, Quantity qty)
+    : Order(id, trader, side, qty) {}
 
 // ======================= StopLossOrder =======================
 
-StopLossOrder::StopLossOrder(const std::string& trader, Side side, int qty,
+StopLossOrder::StopLossOrder(OrderId id, const std::string& trader, Side side, Quantity qty,
                              double triggerPrice, double limitPrice)
-    : Order(trader, side, qty),
+    : Order(id, trader, side, qty),
       triggerPrice_(validateAndConvertPrice(triggerPrice, "Trigger price")),
       limitPrice_(validateAndConvertPrice(limitPrice, "Limit price")) {}
 

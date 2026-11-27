@@ -9,10 +9,12 @@
 
 // ======================= private helpers =======================
 
-void Exchange::validate(const std::string& traderName, int qty) const {
+void Exchange::validate(const std::string& traderName, Quantity qty) const {
     auto it = traders_.find(traderName);
     if (it == traders_.end())
         throw InvalidOrderException("Unknown trader: " + traderName);
+    if (qty <= 0)
+        throw InvalidOrderException("Quantity must be positive");
     if (qty > it->second->maxOrderSize())
         throw InvalidOrderException(
             traderName + " (" + it->second->category() +
@@ -27,42 +29,46 @@ void Exchange::registerTrader(std::unique_ptr<Trader> trader) {
     traders_[name]   = std::move(trader);
 }
 
-int Exchange::placeOrder(const std::string& trader, Side side, int qty, double price) {
+OrderId Exchange::placeOrder(const std::string& trader, Side side, Quantity qty, double price) {
     validate(trader, qty);
-    auto order = std::make_shared<LimitOrder>(trader, side, qty, price);
-    int  id    = order->id();
+    auto order = std::make_shared<LimitOrder>(nextOrderId_, trader, side, qty, price);
+    ++nextOrderId_;
     std::cout << "Placed  " << *order << "\n";
     book_.submit(order);
-    return id;
+    return order->id();
 }
 
-int Exchange::placeOrder(const std::string& trader, Side side, int qty) {
+OrderId Exchange::placeOrder(const std::string& trader, Side side, Quantity qty) {
     validate(trader, qty);
-    auto order = std::make_shared<MarketOrder>(trader, side, qty);
-    int  id    = order->id();
+    auto order = std::make_shared<MarketOrder>(nextOrderId_, trader, side, qty);
+    ++nextOrderId_;
     std::cout << "Placed  " << *order << "\n";
     book_.submit(order);
-    return id;
+    return order->id();
 }
 
-int Exchange::placeOrder(const std::string& trader, Side side, int qty,
-                         double triggerPrice, double limitPrice) {
+OrderId Exchange::placeOrder(const std::string& trader, Side side, Quantity qty,
+                             double triggerPrice, double limitPrice) {
     validate(trader, qty);
-    auto order = std::make_shared<StopLossOrder>(trader, side, qty, triggerPrice, limitPrice);
-    int  id    = order->id();
+    auto order = std::make_shared<StopLossOrder>(nextOrderId_, trader, side, qty, triggerPrice, limitPrice);
+    if (book_.lastTradePrice().has_value() && order->shouldTrigger(*book_.lastTradePrice())) {
+        throw InvalidOrderException(
+            "Stop-loss trigger price is already crossed against last traded price");
+    }
+    ++nextOrderId_;
     std::cout << "Placed  " << *order << "\n";
     book_.submit(order);
-    return id;
+    return order->id();
 }
 
-void Exchange::cancelOrder(const std::string& trader, int orderId) {
+void Exchange::cancelOrder(const std::string& trader, OrderId orderId) {
     if (traders_.find(trader) == traders_.end())
         throw InvalidOrderException("Unknown trader: " + trader);
     book_.cancel(orderId, trader);
     std::cout << "Cancelled #" << orderId << " by " << trader << "\n";
 }
 
-void Exchange::modifyOrder(const std::string& trader, int orderId, int newQty, double newPrice) {
+void Exchange::modifyOrder(const std::string& trader, OrderId orderId, Quantity newQty, double newPrice) {
     validate(trader, newQty);
     Price ticks = validateAndConvertPrice(newPrice, "Price");
     book_.modify(orderId, trader, newQty, ticks);
@@ -75,7 +81,7 @@ TraderReport Exchange::buildTraderReport(const std::string& name, int months) co
     if (traders_.find(name) == traders_.end())
         throw InvalidOrderException("Unknown trader: " + name);
 
-    std::time_t now    = std::time(nullptr);
+    std::time_t now    = clock_();
     std::time_t cutoff = (months > 0)
         ? now - static_cast<std::time_t>(months) * 30 * 24 * 3600
         : 0;

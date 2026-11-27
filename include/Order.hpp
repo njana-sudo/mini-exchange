@@ -2,11 +2,9 @@
 // Order.hpp - abstract Order base class and its concrete subtypes:
 //             LimitOrder, MarketOrder, StopLossOrder
 //
-// OOP tags: [ABSTRACTION] [ENCAPSULATION] [INHERITANCE] [POLYMORPHISM]
-//           [STATIC] [FRIEND] [CONSTRUCTORS]
-//
-// All prices are stored and returned as integer ticks (Price = int64_t).
-// See Types.hpp for the tick system rationale.
+// All prices are stored as Price (int64_t ticks).
+// Order IDs (OrderId = uint64_t) are assigned by the Exchange/OrderBook
+// only after validation succeeds, so rejected orders never burn IDs.
 
 #include "Types.hpp"
 
@@ -19,25 +17,23 @@
 
 class Order {
 private:
-    static int nextId;
-    int         id_;
+    OrderId     id_;
     std::string trader_;
     Side        side_;
-    int         quantity_;
+    Quantity    quantity_;
 
 public:
-    Order(const std::string& trader, Side side, int qty);
+    Order(OrderId id, const std::string& trader, Side side, Quantity qty);
     virtual ~Order() = default;
 
-    int                id()       const { return id_; }
+    OrderId            id()       const { return id_; }
     const std::string& trader()   const { return trader_; }
     Side               side()     const { return side_; }
-    int                quantity() const { return quantity_; }
+    Quantity           quantity() const { return quantity_; }
     bool               isFilled() const { return quantity_ == 0; }
-    void               fill(int qty)    { quantity_ -= qty; }
-    void               setQuantity(int qty);
+    void               fill(Quantity qty) { quantity_ -= qty; }
+    void               setQuantity(Quantity qty);
 
-    // Returns price in ticks.  MarketOrder returns 0 (no price).
     virtual Price       price()    const = 0;
     virtual bool        isMarket() const = 0;
     virtual std::string type()     const = 0;
@@ -47,18 +43,16 @@ public:
     friend std::ostream& operator<<(std::ostream& os, const Order& o);
 };
 
-// Displays price as rupees (to_rupees conversion is display-only).
 std::ostream& operator<<(std::ostream& os, const Order& o);
 
 // ======================= LimitOrder =======================
 
 class LimitOrder : public Order {
 private:
-    Price price_;           // stored in ticks
+    Price price_;
 
 public:
-    // User supplies price in rupees; constructor converts to ticks.
-    LimitOrder(const std::string& trader, Side side, int qty, double price);
+    LimitOrder(OrderId id, const std::string& trader, Side side, Quantity qty, double price);
 
     Price       price()    const override { return price_; }
     bool        isMarket() const override { return false; }
@@ -70,7 +64,7 @@ public:
 
 class MarketOrder : public Order {
 public:
-    MarketOrder(const std::string& trader, Side side, int qty);
+    MarketOrder(OrderId id, const std::string& trader, Side side, Quantity qty);
 
     Price       price()    const override { return 0; }
     bool        isMarket() const override { return true; }
@@ -81,13 +75,12 @@ public:
 
 class StopLossOrder : public Order {
 private:
-    Price triggerPrice_;    // in ticks
-    Price limitPrice_;      // in ticks
+    Price triggerPrice_;
+    Price limitPrice_;
     bool  triggered_ = false;
 
 public:
-    // User supplies prices in rupees; constructor converts both to ticks.
-    StopLossOrder(const std::string& trader, Side side, int qty,
+    StopLossOrder(OrderId id, const std::string& trader, Side side, Quantity qty,
                   double triggerPrice, double limitPrice);
 
     Price       price()    const override { return limitPrice_; }
@@ -100,6 +93,5 @@ public:
     bool  isTriggered()  const { return triggered_; }
     void  activate()           { triggered_ = true; }
 
-    // Comparison is now exact integer arithmetic — no floating-point ambiguity.
     bool shouldTrigger(Price lastPrice) const;
 };

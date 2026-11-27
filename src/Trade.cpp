@@ -6,12 +6,11 @@
 #include <iomanip>
 
 Trade::Trade()
-    : buyOrderId_(0), sellOrderId_(0), price_(0), quantity_(0),
-      timestamp_(std::time(nullptr)) {}
+    : buyOrderId_(0), sellOrderId_(0), price_(0), quantity_(0), timestamp_(0) {}
 
-Trade::Trade(int buyId, int sellId,
+Trade::Trade(OrderId buyId, OrderId sellId,
              const std::string& buyer, const std::string& seller,
-             Price price, int qty, std::time_t ts)
+             Price price, Quantity qty, std::time_t ts)
     : buyOrderId_(buyId), sellOrderId_(sellId),
       buyer_(buyer), seller_(seller),
       price_(price), quantity_(qty), timestamp_(ts) {}

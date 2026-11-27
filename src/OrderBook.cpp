@@ -7,10 +7,18 @@
 #include <iostream>
 #include <iterator>
 
+namespace {
+template <typename Map, typename QueueIt>
+void eraseFromLevel(Map& m, typename Map::iterator levelIt, QueueIt qIt) {
+    levelIt->second.erase(qIt);
+    if (levelIt->second.empty()) m.erase(levelIt);
+}
+}  // namespace
+
 // ======================= match (private template) =======================
 
 template <typename Book>
-bool OrderBook::match(const std::shared_ptr<Order>& incoming, Book& opposite) {
+bool OrderBook::match(const std::shared_ptr<Order>& incoming, Book& opposite, std::time_t now) {
     while (!incoming->isFilled() && !opposite.empty()) {
         auto  level      = opposite.begin();
         Price levelPrice = level->first;
@@ -25,7 +33,6 @@ bool OrderBook::match(const std::shared_ptr<Order>& incoming, Book& opposite) {
         auto& queue   = level->second;
         auto  resting = queue.front();
 
-        // Self-Trade Prevention: never match a trader against their own resting order
         if (resting->trader() == incoming->trader()) {
             if (stpMode_ == StpMode::CANCEL_OLDEST) {
                 std::cout << "  >>> STP: cancelled resting #" << resting->id()
@@ -41,7 +48,7 @@ bool OrderBook::match(const std::shared_ptr<Order>& incoming, Book& opposite) {
             return true;
         }
 
-        int qty = std::min(incoming->quantity(), resting->quantity());
+        Quantity qty = std::min(incoming->quantity(), resting->quantity());
         incoming->fill(qty);
         resting ->fill(qty);
 
@@ -49,7 +56,8 @@ bool OrderBook::match(const std::shared_ptr<Order>& incoming, Book& opposite) {
         const Order& sell = (incoming->side() == Side::SELL) ? *incoming : *resting;
         trades_.emplace_back(buy.id(), sell.id(),
                              buy.trader(), sell.trader(),
-                             levelPrice, qty);
+                             levelPrice, qty, now);
+        lastTradePrice_ = levelPrice;
 
         if (resting->isFilled()) {
             orderIndex_.erase(resting->id());
@@ -60,31 +68,57 @@ bool OrderBook::match(const std::shared_ptr<Order>& incoming, Book& opposite) {
     return false;
 }
 
-// explicit instantiations for both bid and ask maps
-template bool OrderBook::match(const std::shared_ptr<Order>&,
-    std::map<Price, OrderBook::OrderQueue, std::greater<Price>>&);
-template bool OrderBook::match(const std::shared_ptr<Order>&,
-    std::map<Price, OrderBook::OrderQueue>&);
+template bool OrderBook::match(const std::shared_ptr<Order>&, OrderBook::BidMap&, std::time_t);
+template bool OrderBook::match(const std::shared_ptr<Order>&, OrderBook::AskMap&, std::time_t);
 
-// ======================= parkOrder / executeOrder =======================
+// ======================= parkOrder / parkStopOrder / executeOrder =======================
 
 void OrderBook::parkOrder(const std::shared_ptr<Order>& order) {
     Price p = order->price();
+    OrderLocation loc;
     if (order->side() == Side::BUY) {
-        auto& q = bids_[p];
-        q.push_back(order);
-        orderIndex_[order->id()] = {false, Side::BUY, p, std::prev(q.end()), {}};
+        auto [levelIt, inserted] = bids_.try_emplace(p);
+        (void)inserted;
+        levelIt->second.push_back(order);
+        loc.bucket     = Bucket::BID;
+        loc.bidLevelIt = levelIt;
+        loc.queueIt    = std::prev(levelIt->second.end());
     } else {
-        auto& q = asks_[p];
-        q.push_back(order);
-        orderIndex_[order->id()] = {false, Side::SELL, p, std::prev(q.end()), {}};
+        auto [levelIt, inserted] = asks_.try_emplace(p);
+        (void)inserted;
+        levelIt->second.push_back(order);
+        loc.bucket     = Bucket::ASK;
+        loc.askLevelIt = levelIt;
+        loc.queueIt    = std::prev(levelIt->second.end());
     }
+    orderIndex_[order->id()] = loc;
 }
 
-void OrderBook::executeOrder(const std::shared_ptr<Order>& order) {
+void OrderBook::parkStopOrder(const std::shared_ptr<StopLossOrder>& sl) {
+    Price trig = sl->triggerPrice();
+    OrderLocation loc;
+    if (sl->side() == Side::BUY) {
+        auto [levelIt, inserted] = stopBuys_.try_emplace(trig);
+        (void)inserted;
+        levelIt->second.push_back(sl);
+        loc.bucket         = Bucket::STOP_BUY;
+        loc.stopBuyLevelIt = levelIt;
+        loc.stopQueueIt    = std::prev(levelIt->second.end());
+    } else {
+        auto [levelIt, inserted] = stopSells_.try_emplace(trig);
+        (void)inserted;
+        levelIt->second.push_back(sl);
+        loc.bucket          = Bucket::STOP_SELL;
+        loc.stopSellLevelIt = levelIt;
+        loc.stopQueueIt     = std::prev(levelIt->second.end());
+    }
+    orderIndex_[sl->id()] = loc;
+}
+
+void OrderBook::executeOrder(const std::shared_ptr<Order>& order, std::time_t now) {
     bool stpCancelled = (order->side() == Side::BUY)
-                        ? match(order, asks_)
-                        : match(order, bids_);
+                        ? match(order, asks_, now)
+                        : match(order, bids_, now);
 
     if (stpCancelled) return;
 
@@ -100,60 +134,65 @@ void OrderBook::executeOrder(const std::shared_ptr<Order>& order) {
 }
 
 // ======================= checkStopOrders =======================
+// Called only when new trades occurred. Fires stops in trigger-price then FIFO order:
+//   - Sell stops: highest trigger price first (stopSells_.begin())
+//   - Buy stops:  lowest trigger price first  (stopBuys_.begin())
 
-void OrderBook::checkStopOrders() {
-    if (trades_.empty() || stopOrders_.empty()) return;
+void OrderBook::checkStopOrders(std::time_t now) {
+    if (!lastTradePrice_.has_value()) return;
 
-    bool activated;
-    do {
-        activated       = false;
-        Price lastPrice = trades_.back().price();
-        auto  it        = stopOrders_.begin();
+    while (true) {
+        Price lastPrice = *lastTradePrice_;
+        std::shared_ptr<StopLossOrder> sl;
 
-        while (it != stopOrders_.end()) {
-            if ((*it)->shouldTrigger(lastPrice)) {
-                auto sl = *it;
-                sl->activate();
-                std::cout << "  >>> SL triggered: " << *sl << "\n";
-                orderIndex_.erase(sl->id());
-                it = stopOrders_.erase(it);
-
-                executeOrder(sl);
-                activated = true;   // cascade: new trades may trigger more SLs
-            } else {
-                ++it;
-            }
+        if (!stopSells_.empty() && stopSells_.begin()->first >= lastPrice) {
+            auto levelIt = stopSells_.begin();
+            sl = levelIt->second.front();
+            orderIndex_.erase(sl->id());
+            levelIt->second.pop_front();
+            if (levelIt->second.empty()) stopSells_.erase(levelIt);
+        } else if (!stopBuys_.empty() && stopBuys_.begin()->first <= lastPrice) {
+            auto levelIt = stopBuys_.begin();
+            sl = levelIt->second.front();
+            orderIndex_.erase(sl->id());
+            levelIt->second.pop_front();
+            if (levelIt->second.empty()) stopBuys_.erase(levelIt);
+        } else {
+            break;
         }
-    } while (activated);
+
+        sl->activate();
+        std::cout << "  >>> SL triggered: " << *sl << "\n";
+        executeOrder(sl, now);
+    }
 }
 
 // ======================= removeOrder =======================
 
-std::shared_ptr<Order> OrderBook::removeOrder(int orderId, const std::string& trader) {
+std::shared_ptr<Order> OrderBook::removeOrder(OrderId orderId, const std::string& trader) {
     auto idxIt = orderIndex_.find(orderId);
     if (idxIt == orderIndex_.end())
         throw InvalidOrderException("Order #" + std::to_string(orderId) +
                                     " not found (already filled or cancelled)");
 
     const OrderLocation& loc = idxIt->second;
-    std::shared_ptr<Order> order = loc.isStopLoss
-        ? std::static_pointer_cast<Order>(*loc.stopIt)
-        : *loc.bookIt;
+    std::shared_ptr<Order> order;
+    switch (loc.bucket) {
+        case Bucket::BID:       order = *loc.queueIt; break;
+        case Bucket::ASK:       order = *loc.queueIt; break;
+        case Bucket::STOP_BUY:  order = *loc.stopQueueIt; break;
+        case Bucket::STOP_SELL: order = *loc.stopQueueIt; break;
+    }
 
     if (order->trader() != trader)
         throw InvalidOrderException(trader + " cannot modify/cancel order #" +
                                     std::to_string(orderId) + " owned by " + order->trader());
 
-    if (loc.isStopLoss) {
-        stopOrders_.erase(loc.stopIt);
-    } else if (loc.side == Side::BUY) {
-        auto levelIt = bids_.find(loc.price);
-        levelIt->second.erase(loc.bookIt);
-        if (levelIt->second.empty()) bids_.erase(levelIt);
-    } else {
-        auto levelIt = asks_.find(loc.price);
-        levelIt->second.erase(loc.bookIt);
-        if (levelIt->second.empty()) asks_.erase(levelIt);
+    switch (loc.bucket) {
+        case Bucket::BID:       eraseFromLevel(bids_,      loc.bidLevelIt,      loc.queueIt);     break;
+        case Bucket::ASK:       eraseFromLevel(asks_,      loc.askLevelIt,      loc.queueIt);     break;
+        case Bucket::STOP_BUY:  eraseFromLevel(stopBuys_,  loc.stopBuyLevelIt,  loc.stopQueueIt); break;
+        case Bucket::STOP_SELL: eraseFromLevel(stopSells_, loc.stopSellLevelIt, loc.stopQueueIt); break;
     }
 
     orderIndex_.erase(idxIt);
@@ -163,23 +202,29 @@ std::shared_ptr<Order> OrderBook::removeOrder(int orderId, const std::string& tr
 // ======================= submit / cancel / modify =======================
 
 void OrderBook::submit(const std::shared_ptr<Order>& order) {
-    // [DYNAMIC_CAST] park untriggered SL orders in the pending queue
     auto sl = std::dynamic_pointer_cast<StopLossOrder>(order);
     if (sl && !sl->isTriggered()) {
-        stopOrders_.push_back(sl);
-        orderIndex_[order->id()] = {true, order->side(), 0, {}, std::prev(stopOrders_.end())};
+        if (lastTradePrice_.has_value() && sl->shouldTrigger(*lastTradePrice_)) {
+            throw InvalidOrderException(
+                "Stop-loss trigger price is already crossed against last traded price");
+        }
+        parkStopOrder(sl);
         return;
     }
 
-    executeOrder(order);
-    checkStopOrders();
+    std::time_t now          = clock_();
+    size_t      tradesBefore = trades_.size();
+    executeOrder(order, now);
+    if (trades_.size() > tradesBefore) {
+        checkStopOrders(now);
+    }
 }
 
-void OrderBook::cancel(int orderId, const std::string& trader) {
+void OrderBook::cancel(OrderId orderId, const std::string& trader) {
     removeOrder(orderId, trader);
 }
 
-void OrderBook::modify(int orderId, const std::string& trader, int newQty, Price newPrice) {
+void OrderBook::modify(OrderId orderId, const std::string& trader, Quantity newQty, Price newPrice) {
     if (newQty <= 0)   throw InvalidOrderException("Quantity must be positive");
     if (newPrice <= 0) throw InvalidOrderException("Price must be positive");
 
@@ -189,22 +234,26 @@ void OrderBook::modify(int orderId, const std::string& trader, int newQty, Price
                                     " not found (already filled or cancelled)");
 
     const OrderLocation& loc = idxIt->second;
-    if (loc.isStopLoss) {
-        if ((*loc.stopIt)->trader() != trader)
+    if (loc.bucket == Bucket::STOP_BUY || loc.bucket == Bucket::STOP_SELL) {
+        auto sl = *loc.stopQueueIt;
+        if (sl->trader() != trader)
             throw InvalidOrderException(trader + " cannot modify order #" +
-                                        std::to_string(orderId) + " owned by " +
-                                        (*loc.stopIt)->trader());
+                                        std::to_string(orderId) + " owned by " + sl->trader());
         throw InvalidOrderException("Cannot modify pending stop-loss order #" +
                                     std::to_string(orderId) + "; cancel and re-place");
     }
 
-    auto order = *loc.bookIt;
+    auto order = *loc.queueIt;
     if (order->trader() != trader)
         throw InvalidOrderException(trader + " cannot modify order #" +
                                     std::to_string(orderId) + " owned by " + order->trader());
 
+    Price currentPrice = (loc.bucket == Bucket::BID)
+                         ? loc.bidLevelIt->first
+                         : loc.askLevelIt->first;
+
     // Size reduction at the same price preserves FIFO time priority in O(1)
-    if (newPrice == loc.price && newQty <= order->quantity()) {
+    if (newPrice == currentPrice && newQty <= order->quantity()) {
         order->setQuantity(newQty);
         return;
     }
@@ -213,17 +262,24 @@ void OrderBook::modify(int orderId, const std::string& trader, int newQty, Price
     removeOrder(orderId, trader);
     order->setQuantity(newQty);
     order->setPrice(newPrice);
-    executeOrder(order);
-    checkStopOrders();
+
+    std::time_t now          = clock_();
+    size_t      tradesBefore = trades_.size();
+    executeOrder(order, now);
+    if (trades_.size() > tradesBefore) {
+        checkStopOrders(now);
+    }
 }
 
 // ======================= queries =======================
 
-int OrderBook::remainingQuantity(int orderId) const {
+Quantity OrderBook::remainingQuantity(OrderId orderId) const {
     auto it = orderIndex_.find(orderId);
     if (it == orderIndex_.end()) return 0;
     const OrderLocation& loc = it->second;
-    return loc.isStopLoss ? (*loc.stopIt)->quantity() : (*loc.bookIt)->quantity();
+    if (loc.bucket == Bucket::STOP_BUY || loc.bucket == Bucket::STOP_SELL)
+        return (*loc.stopQueueIt)->quantity();
+    return (*loc.queueIt)->quantity();
 }
 
 std::optional<Price> OrderBook::bestBid() const {
@@ -243,15 +299,17 @@ void OrderBook::print() const {
     std::cout << "SELLS (lowest first)\n";
     for (const auto& [price, queue] : asks_)
         for (const auto& o : queue)
-            std::cout << "  " << *o << "\n";   // [POLYMORPHISM] prints correct subtype
+            std::cout << "  " << *o << "\n";
     std::cout << "BUYS (highest first)\n";
     for (const auto& [price, queue] : bids_)
         for (const auto& o : queue)
             std::cout << "  " << *o << "\n";
-    if (!stopOrders_.empty()) {
+    if (!stopSells_.empty() || !stopBuys_.empty()) {
         std::cout << "STOP-LOSS (pending)\n";
-        for (const auto& o : stopOrders_)
-            std::cout << "  " << *o << "\n";
+        for (const auto& [trig, queue] : stopSells_)
+            for (const auto& o : queue) std::cout << "  " << *o << "\n";
+        for (const auto& [trig, queue] : stopBuys_)
+            for (const auto& o : queue) std::cout << "  " << *o << "\n";
     }
     std::cout << "--------------------\n";
 }

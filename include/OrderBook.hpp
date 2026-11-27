@@ -1,8 +1,12 @@
 #pragma once
 // OrderBook.hpp - HOT PATH: price-time-priority matching engine.
-// Map keys are Price (int64_t ticks) — no floating-point comparison.
-// Each price level uses std::list so iterators remain valid across inserts/erases,
-// enabling O(1) lookup, cancellation, and modification via orderIndex_.
+//
+// Features:
+//   - Integer tick prices (Price = int64_t)
+//   - True O(1) cancel via stored map + list iterators in orderIndex_
+//   - Stop-loss books ordered by trigger price then FIFO time priority (O(log S + k))
+//   - Configurable Self-Trade Prevention (STP)
+//   - Injected deterministic Clock for reproducible Trade timestamps
 
 #include "Order.hpp"
 #include "Trade.hpp"
@@ -19,55 +23,65 @@
 
 class OrderBook {
 private:
-    using OrderQueue = std::list<std::shared_ptr<Order>>;
-    using StopQueue  = std::list<std::shared_ptr<StopLossOrder>>;
+    using OrderQueue  = std::list<std::shared_ptr<Order>>;
+    using StopQueue   = std::list<std::shared_ptr<StopLossOrder>>;
+    using BidMap      = std::map<Price, OrderQueue, std::greater<Price>>;
+    using AskMap      = std::map<Price, OrderQueue>;
+    using StopSellMap = std::map<Price, StopQueue, std::greater<Price>>;  // highest trigger first
+    using StopBuyMap  = std::map<Price, StopQueue>;                       // lowest trigger first
+
+    enum class Bucket { BID, ASK, STOP_BUY, STOP_SELL };
 
     struct OrderLocation {
-        bool                 isStopLoss = false;
-        Side                 side       = Side::BUY;
-        Price                price      = 0;
-        OrderQueue::iterator bookIt;
-        StopQueue::iterator  stopIt;
+        Bucket                bucket = Bucket::BID;
+        BidMap::iterator      bidLevelIt;
+        AskMap::iterator      askLevelIt;
+        StopBuyMap::iterator  stopBuyLevelIt;
+        StopSellMap::iterator stopSellLevelIt;
+        OrderQueue::iterator  queueIt;
+        StopQueue::iterator   stopQueueIt;
     };
 
-    // Bids: highest tick first (std::greater).
-    // Asks: lowest tick first (default).
-    // Using integer Price keys eliminates all ULP/floating-point ambiguity.
-    std::map<Price, OrderQueue, std::greater<Price>> bids_;
-    std::map<Price, OrderQueue>                      asks_;
+    BidMap      bids_;
+    AskMap      asks_;
+    StopBuyMap  stopBuys_;
+    StopSellMap stopSells_;
 
-    std::vector<Trade>                       trades_;
-    StopQueue                                stopOrders_;
-    std::unordered_map<int, OrderLocation>   orderIndex_;  // O(1) lookup by orderId
-    StpMode                                  stpMode_;
+    std::vector<Trade>                         trades_;
+    std::unordered_map<OrderId, OrderLocation> orderIndex_;
+    std::optional<Price>                       lastTradePrice_;
+    StpMode                                    stpMode_;
+    Clock                                      clock_;
 
-    // Returns true if the incoming order's remainder was cancelled by STP.
     template <typename Book>
-    bool match(const std::shared_ptr<Order>& incoming, Book& opposite);
+    bool match(const std::shared_ptr<Order>& incoming, Book& opposite, std::time_t now);
 
     void parkOrder(const std::shared_ptr<Order>& order);
-    void executeOrder(const std::shared_ptr<Order>& order);
-    void checkStopOrders();
+    void parkStopOrder(const std::shared_ptr<StopLossOrder>& sl);
+    void executeOrder(const std::shared_ptr<Order>& order, std::time_t now);
+    void checkStopOrders(std::time_t now);
 
-    // Remove an order from its resting book level or pending SL queue and from orderIndex_.
-    std::shared_ptr<Order> removeOrder(int orderId, const std::string& trader);
+    std::shared_ptr<Order> removeOrder(OrderId orderId, const std::string& trader);
 
 public:
-    explicit OrderBook(StpMode stpMode = StpMode::CANCEL_OLDEST) : stpMode_(stpMode) {}
+    explicit OrderBook(StpMode stpMode = StpMode::CANCEL_OLDEST,
+                       Clock clock = systemClock())
+        : stpMode_(stpMode), clock_(std::move(clock)) {}
 
     StpMode stpMode() const { return stpMode_; }
     void    setStpMode(StpMode mode) { stpMode_ = mode; }
 
     void submit(const std::shared_ptr<Order>& order);
-    void cancel(int orderId, const std::string& trader);
-    void modify(int orderId, const std::string& trader, int newQty, Price newPrice);
+    void cancel(OrderId orderId, const std::string& trader);
+    void modify(OrderId orderId, const std::string& trader, Quantity newQty, Price newPrice);
 
-    bool                      hasOrder(int orderId) const { return orderIndex_.find(orderId) != orderIndex_.end(); }
-    size_t                    openOrderCount() const { return orderIndex_.size(); }
-    int                       remainingQuantity(int orderId) const;
-    std::optional<Price>      bestBid() const;
-    std::optional<Price>      bestAsk() const;
-    const std::vector<Trade>& trades() const { return trades_; }
+    bool                       hasOrder(OrderId orderId) const { return orderIndex_.find(orderId) != orderIndex_.end(); }
+    size_t                     openOrderCount() const { return orderIndex_.size(); }
+    Quantity                   remainingQuantity(OrderId orderId) const;
+    std::optional<Price>       bestBid() const;
+    std::optional<Price>       bestAsk() const;
+    std::optional<Price>       lastTradePrice() const { return lastTradePrice_; }
+    const std::vector<Trade>&  trades() const { return trades_; }
 
     void print() const;
 };
