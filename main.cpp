@@ -3,7 +3,8 @@
 // Concept map (search for these tags in the code):
 //   [ENCAPSULATION]  private data + public getters
 //   [ABSTRACTION]    abstract classes with pure virtual functions
-//   [INHERITANCE]    LimitOrder/MarketOrder -> Order, RetailTrader/InstitutionalTrader -> Trader
+//   [INHERITANCE]    LimitOrder/MarketOrder/StopLossOrder -> Order,
+//                    RetailTrader/InstitutionalTrader -> Trader
 //   [POLYMORPHISM]   virtual functions called through base-class pointers (runtime),
 //                    function and operator overloading, templates (compile time)
 //   [CONSTRUCTORS]   constructor overloading, initializer lists, virtual destructors
@@ -11,6 +12,7 @@
 //   [FRIEND]         friend function for operator<<
 //   [COMPOSITION]    Exchange "has an" OrderBook and "has" Traders
 //   [EXCEPTIONS]     custom exception class
+//   [DYNAMIC_CAST]   dynamic_pointer_cast to identify order subtypes at runtime
 
 #include <algorithm>
 #include <deque>
@@ -19,6 +21,7 @@
 #include <iostream>
 #include <map>
 #include <memory>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -64,17 +67,20 @@ public:
     virtual bool isMarket() const = 0;
     virtual double price() const = 0;
     virtual std::string type() const = 0;
+    virtual std::string info() const { return ""; }   // extra display info for subtypes
 
     // [FRIEND] non-member function allowed to read private members
     friend std::ostream& operator<<(std::ostream& os, const Order& o);
 };
 int Order::nextId = 1;
 
-// [POLYMORPHISM] operator overloading; o.type() is resolved at runtime (virtual call)
+// [POLYMORPHISM] operator overloading; o.type() and o.info() are resolved at runtime (virtual call)
 std::ostream& operator<<(std::ostream& os, const Order& o) {
     os << "#" << o.id_ << " " << o.type() << " " << toString(o.side_) << " " << o.quantity_
        << " by " << o.trader_;
     if (!o.isMarket()) os << " @ " << std::fixed << std::setprecision(2) << o.price();
+    std::string extra = o.info();
+    if (!extra.empty()) os << extra;
     return os;
 }
 
@@ -102,6 +108,45 @@ public:
     std::string type() const override { return "MARKET"; }
 };
 
+// [INHERITANCE] StopLossOrder "is an" Order: stays pending until the market hits a trigger price,
+// then activates as a limit order.  Like Zerodha's SL order.
+class StopLossOrder : public Order {
+private:
+    double triggerPrice_;
+    double limitPrice_;
+    bool triggered_ = false;
+
+public:
+    StopLossOrder(const std::string& trader, Side side, int qty,
+                  double triggerPrice, double limitPrice)
+        : Order(trader, side, qty), triggerPrice_(triggerPrice), limitPrice_(limitPrice) {
+        if (triggerPrice <= 0) throw InvalidOrderException("Trigger price must be positive");
+        if (limitPrice <= 0)  throw InvalidOrderException("Limit price must be positive");
+    }
+
+    bool isMarket() const override { return false; }
+    double price()    const override { return limitPrice_; }
+    std::string type() const override { return triggered_ ? "SL-ACTIVE" : "SL-PENDING"; }
+
+    double triggerPrice() const { return triggerPrice_; }
+    bool   isTriggered()  const { return triggered_; }
+    void   activate()           { triggered_ = true; }
+
+    // [POLYMORPHISM] sell SL triggers when price drops; buy SL triggers when price rises
+    bool shouldTrigger(double lastPrice) const {
+        if (triggered_) return false;
+        return (side() == Side::SELL) ? lastPrice <= triggerPrice_
+                                     : lastPrice >= triggerPrice_;
+    }
+
+    // [POLYMORPHISM] extra display info shows the trigger price
+    std::string info() const override {
+        std::ostringstream oss;
+        oss << " (trigger " << std::fixed << std::setprecision(2) << triggerPrice_ << ")";
+        return oss.str();
+    }
+};
+
 // ======================= Trade =======================
 
 class Trade {
@@ -115,6 +160,8 @@ public:
     Trade() : buyOrderId_(0), sellOrderId_(0), price_(0.0), quantity_(0) {}   // [CONSTRUCTORS] default
     Trade(int buyId, int sellId, double price, int qty)                        // [CONSTRUCTORS] parameterized
         : buyOrderId_(buyId), sellOrderId_(sellId), price_(price), quantity_(qty) {}
+
+    double price() const { return price_; }   // needed by OrderBook to check stop-loss triggers
 
     friend std::ostream& operator<<(std::ostream& os, const Trade& t) {
         return os << "TRADE buy#" << t.buyOrderId_ << " sell#" << t.sellOrderId_ << " " << t.quantity_
@@ -159,6 +206,7 @@ private:
     std::map<double, std::deque<std::shared_ptr<Order>>, std::greater<double>> bids_;
     std::map<double, std::deque<std::shared_ptr<Order>>> asks_;
     std::vector<Trade> trades_;
+    std::vector<std::shared_ptr<StopLossOrder>> stopOrders_;   // pending stop-loss orders
 
     // [POLYMORPHISM] compile-time (template): the same matching code works for both sides of the book
     template <typename Book>
@@ -186,8 +234,48 @@ private:
         }
     }
 
+    // [DYNAMIC_CAST] after every trade, check whether any pending stop-loss should activate
+    void checkStopOrders() {
+        if (trades_.empty() || stopOrders_.empty()) return;
+
+        bool activated;
+        do {
+            activated = false;
+            double lastPrice = trades_.back().price();
+            auto it = stopOrders_.begin();
+            while (it != stopOrders_.end()) {
+                if ((*it)->shouldTrigger(lastPrice)) {
+                    auto sl = *it;
+                    sl->activate();
+                    std::cout << "  >>> SL triggered: " << *sl << "\n";
+                    it = stopOrders_.erase(it);
+
+                    // submit the activated order into the book as a regular limit order
+                    std::shared_ptr<Order> order = sl;
+                    if (order->side() == Side::BUY)  match(order, asks_);
+                    else                             match(order, bids_);
+
+                    if (!order->isFilled()) {
+                        if (order->side() == Side::BUY) bids_[order->price()].push_back(order);
+                        else                            asks_[order->price()].push_back(order);
+                    }
+                    activated = true;   // new trades may trigger more stop-losses (cascade)
+                } else {
+                    ++it;
+                }
+            }
+        } while (activated);
+    }
+
 public:
     void submit(const std::shared_ptr<Order>& order) {
+        // [DYNAMIC_CAST] detect stop-loss orders at runtime and park them separately
+        auto slOrder = std::dynamic_pointer_cast<StopLossOrder>(order);
+        if (slOrder && !slOrder->isTriggered()) {
+            stopOrders_.push_back(slOrder);
+            return;
+        }
+
         if (order->side() == Side::BUY) match(order, asks_);
         else match(order, bids_);
 
@@ -201,6 +289,8 @@ public:
                 asks_[order->price()].push_back(order);
             }
         }
+
+        checkStopOrders();
     }
 
     const std::vector<Trade>& trades() const { return trades_; }
@@ -213,6 +303,10 @@ public:
         std::cout << "BUYS (highest first)\n";
         for (const auto& [price, queue] : bids_)
             for (const auto& o : queue) std::cout << "  " << *o << "\n";
+        if (!stopOrders_.empty()) {
+            std::cout << "STOP-LOSS (pending)\n";
+            for (const auto& o : stopOrders_) std::cout << "  " << *o << "\n";
+        }
         std::cout << "--------------------\n";
     }
 };
@@ -259,6 +353,13 @@ public:
         std::cout << "Placed  " << *order << "\n";
         book_.submit(order);
     }
+    void placeOrder(const std::string& trader, Side side, int qty,                   // stop-loss order
+                    double triggerPrice, double limitPrice) {
+        validate(trader, qty);
+        auto order = std::make_shared<StopLossOrder>(trader, side, qty, triggerPrice, limitPrice);
+        std::cout << "Placed  " << *order << "\n";
+        book_.submit(order);
+    }
 
     void listTraders() const {
         std::cout << "Registered traders\n";
@@ -279,17 +380,32 @@ int main() {
     exchange.listTraders();
     std::cout << "\n";
 
-    // Build up resting orders
-    exchange.placeOrder("Asha", Side::SELL, 50, 101.00);
-    exchange.placeOrder("Ravi", Side::SELL, 30, 102.00);
-    exchange.placeOrder("AlphaFund", Side::BUY, 40, 99.00);
+    // Build up resting limit orders
+    exchange.placeOrder("Asha",      Side::SELL, 50, 101.00);
+    exchange.placeOrder("Ravi",      Side::SELL, 30, 102.00);
+    exchange.placeOrder("AlphaFund", Side::BUY,  40,  99.00);
+
+    // Asha protects her position with a stop-loss:
+    //   "If price drops to 98, sell 20 shares at limit 97.50"
+    exchange.placeOrder("Asha", Side::SELL, 20, 98.00, 97.50);
     exchange.book().print();
 
-    // A buy that crosses the spread -> trades happen
+    // A buy that crosses the spread -> trades at 101 and 102 (above trigger, SL stays pending)
     std::cout << "\n";
     exchange.placeOrder("AlphaFund", Side::BUY, 70, 102.00);
-    // A market order takes whatever is available
-    exchange.placeOrder("Ravi", Side::BUY, 20);
+    exchange.book().print();
+
+    // AlphaFund adds another bid at 98
+    exchange.placeOrder("AlphaFund", Side::BUY, 30, 98.00);
+
+    // Ravi sells aggressively -> trades at 99 then 98 -> triggers Asha's stop-loss!
+    std::cout << "\n--- Ravi sells aggressively, price drops ---\n";
+    exchange.placeOrder("Ravi", Side::SELL, 60, 97.00);
+    exchange.book().print();
+
+    // A market order sweeps the remaining liquidity from the triggered SL
+    std::cout << "\n";
+    exchange.placeOrder("AlphaFund", Side::BUY, 10);
     exchange.book().print();
 
     // Error handling: exceeds the retail limit, and an invalid price
