@@ -101,7 +101,7 @@ cmake --build build-dbg
 Each step is reviewed for correctness, speed, and behaviour under load before the next begins.
 
 ### Phase 1 — Make it correct
-- [ ] **Integer tick prices** — replace `double` map keys with `int64_t` ticks; eliminates floating-point comparison bugs and makes the order book a true integer structure. Real exchanges do not use floats.
+- [x] **Integer tick prices** — replace `double` map keys with `int64_t` ticks; eliminates floating-point comparison bugs and makes the order book a true integer structure. Real exchanges do not use floats.
 - [ ] **Order cancellation and modification** — `O(1)` lookup by order ID via a parallel `unordered_map`; cancellation must be safe under concurrent reads of the resting book.
 - [ ] **Self-trade prevention** — reject or cancel-and-replace any incoming order that would match against the same trader's own resting order.
 

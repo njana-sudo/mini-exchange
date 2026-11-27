@@ -1,8 +1,9 @@
 #pragma once
-// TraderReport.hpp - cold-path analytics: buy/sell history and realized P&L for one trader
-//                    over a configurable time window.
-//
-// OOP tags: [ENCAPSULATION] [COMPOSITION] [NESTED_STRUCT] [FRIEND]
+// TraderReport.hpp - cold-path analytics.
+// All internal arithmetic is done in ticks (int64_t).
+// Results are exposed in rupees (double) only for display.
+
+#include "Types.hpp"
 
 #include <algorithm>
 #include <ctime>
@@ -10,21 +11,18 @@
 #include <string>
 #include <vector>
 
-// ======================= TraderReport =======================
-
-// [ENCAPSULATION] [COMPOSITION] aggregates executed trades for one trader and computes P&L.
 class TraderReport {
 private:
     std::string name_;
-    int         months_;   // 0 = all time
+    int         months_;
 
-    // [NESTED_STRUCT] groups the fields of a single trade line-item together
     struct Entry {
         int         orderId;
-        double      price;
+        Price       price;      // ticks
         int         quantity;
         std::time_t timestamp;
-        double value() const { return price * quantity; }
+        // Value in ticks×shares; divide by TICKS_PER_RUPEE for rupee value.
+        int64_t value() const { return static_cast<int64_t>(price) * quantity; }
     };
 
     std::vector<Entry> buys_;
@@ -33,20 +31,22 @@ private:
 public:
     TraderReport(const std::string& name, int months);
 
-    void addBuy (int orderId, double price, int qty, std::time_t ts);
-    void addSell(int orderId, double price, int qty, std::time_t ts);
+    void addBuy (int orderId, Price price, int qty, std::time_t ts);
+    void addSell(int orderId, Price price, int qty, std::time_t ts);
 
-    bool   empty()          const { return buys_.empty() && sells_.empty(); }
-    int    totalBought()    const;
-    double totalBuyCost()   const;
-    int    totalSold()      const;
-    double totalSellRevenue() const;
-    double avgBuyPrice()    const;
-    double avgSellPrice()   const;
-    int    netPosition()    const;
-    double realizedPnL()    const;   // average-cost method (same as Zerodha Console)
+    bool    empty()          const { return buys_.empty() && sells_.empty(); }
 
-    // [FRIEND]
+    int     totalBought()    const;
+    int64_t totalBuyCost()   const;   // ticks×shares
+    int     totalSold()      const;
+    int64_t totalSellRevenue() const; // ticks×shares
+
+    // Display-only conversions to rupees:
+    double avgBuyPrice()    const;    // ₹ per share
+    double avgSellPrice()   const;    // ₹ per share
+    int    netPosition()    const;    // shares (positive = long, negative = short)
+    double realizedPnL()    const;    // ₹ (avg-cost method)
+
     friend std::ostream& operator<<(std::ostream& os, const TraderReport& r);
 };
 

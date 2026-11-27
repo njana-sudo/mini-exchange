@@ -3,9 +3,21 @@
 #include "Order.hpp"
 #include "Types.hpp"
 
+#include <cmath>
 #include <iomanip>
 #include <sstream>
 #include <stdexcept>
+
+namespace {
+Price validateAndConvertPrice(double rupees, const char* label) {
+    if (!std::isfinite(rupees))
+        throw InvalidOrderException(std::string(label) + " must be finite");
+    Price ticks = to_ticks(rupees);
+    if (ticks <= 0)
+        throw InvalidOrderException(std::string(label) + " must be positive");
+    return ticks;
+}
+}  // namespace
 
 // ======================= Order =======================
 
@@ -20,7 +32,7 @@ std::ostream& operator<<(std::ostream& os, const Order& o) {
     os << "#" << o.id_ << " " << o.type() << " " << toString(o.side_)
        << " " << o.quantity_ << " by " << o.trader_;
     if (!o.isMarket())
-        os << " @ " << std::fixed << std::setprecision(2) << o.price();
+        os << " @ " << std::fixed << std::setprecision(2) << to_rupees(o.price());
     std::string extra = o.info();
     if (!extra.empty()) os << extra;
     return os;
@@ -29,9 +41,7 @@ std::ostream& operator<<(std::ostream& os, const Order& o) {
 // ======================= LimitOrder =======================
 
 LimitOrder::LimitOrder(const std::string& trader, Side side, int qty, double price)
-    : Order(trader, side, qty), price_(price) {
-    if (price <= 0) throw InvalidOrderException("Price must be positive");
-}
+    : Order(trader, side, qty), price_(validateAndConvertPrice(price, "Price")) {}
 
 // ======================= MarketOrder =======================
 
@@ -42,18 +52,17 @@ MarketOrder::MarketOrder(const std::string& trader, Side side, int qty)
 
 StopLossOrder::StopLossOrder(const std::string& trader, Side side, int qty,
                              double triggerPrice, double limitPrice)
-    : Order(trader, side, qty), triggerPrice_(triggerPrice), limitPrice_(limitPrice) {
-    if (triggerPrice <= 0) throw InvalidOrderException("Trigger price must be positive");
-    if (limitPrice  <= 0) throw InvalidOrderException("Limit price must be positive");
-}
+    : Order(trader, side, qty),
+      triggerPrice_(validateAndConvertPrice(triggerPrice, "Trigger price")),
+      limitPrice_(validateAndConvertPrice(limitPrice, "Limit price")) {}
 
 std::string StopLossOrder::info() const {
     std::ostringstream oss;
-    oss << " (trigger " << std::fixed << std::setprecision(2) << triggerPrice_ << ")";
+    oss << " (trigger " << std::fixed << std::setprecision(2) << to_rupees(triggerPrice_) << ")";
     return oss.str();
 }
 
-bool StopLossOrder::shouldTrigger(double lastPrice) const {
+bool StopLossOrder::shouldTrigger(Price lastPrice) const {
     if (triggered_) return false;
     return (side() == Side::SELL) ? lastPrice <= triggerPrice_
                                   : lastPrice >= triggerPrice_;

@@ -12,8 +12,8 @@
 template <typename Book>
 void OrderBook::match(const std::shared_ptr<Order>& incoming, Book& opposite) {
     while (!incoming->isFilled() && !opposite.empty()) {
-        auto   level      = opposite.begin();
-        double levelPrice = level->first;
+        auto  level      = opposite.begin();
+        Price levelPrice = level->first;
 
         if (!incoming->isMarket()) {
             bool crosses = (incoming->side() == Side::BUY)
@@ -41,9 +41,9 @@ void OrderBook::match(const std::shared_ptr<Order>& incoming, Book& opposite) {
 
 // explicit instantiations so the linker can find them from other .cpp files
 template void OrderBook::match(const std::shared_ptr<Order>&,
-    std::map<double, std::deque<std::shared_ptr<Order>>, std::greater<double>>&);
+    std::map<Price, std::deque<std::shared_ptr<Order>>, std::greater<Price>>&);
 template void OrderBook::match(const std::shared_ptr<Order>&,
-    std::map<double, std::deque<std::shared_ptr<Order>>>&);
+    std::map<Price, std::deque<std::shared_ptr<Order>>>&);
 
 // ======================= checkStopOrders =======================
 
@@ -52,9 +52,9 @@ void OrderBook::checkStopOrders() {
 
     bool activated;
     do {
-        activated        = false;
-        double lastPrice = trades_.back().price();
-        auto   it        = stopOrders_.begin();
+        activated       = false;
+        Price lastPrice = trades_.back().price();
+        auto  it        = stopOrders_.begin();
 
         while (it != stopOrders_.end()) {
             if ((*it)->shouldTrigger(lastPrice)) {

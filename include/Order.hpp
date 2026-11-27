@@ -4,6 +4,9 @@
 //
 // OOP tags: [ABSTRACTION] [ENCAPSULATION] [INHERITANCE] [POLYMORPHISM]
 //           [STATIC] [FRIEND] [CONSTRUCTORS]
+//
+// All prices are stored and returned as integer ticks (Price = int64_t).
+// See Types.hpp for the tick system rationale.
 
 #include "Types.hpp"
 
@@ -14,21 +17,18 @@
 
 // ======================= Order (abstract base) =======================
 
-// [ABSTRACTION] Order cannot be instantiated — derived classes implement pure virtual functions.
 class Order {
-private:                           // [ENCAPSULATION] hidden from outside code
-    static int nextId;             // [STATIC] shared counter across all instances
-    int    id_;
+private:
+    static int nextId;
+    int         id_;
     std::string trader_;
-    Side   side_;
-    int    quantity_;
+    Side        side_;
+    int         quantity_;
 
 public:
-    // [CONSTRUCTORS] initializer-list constructor; throws on bad input
     Order(const std::string& trader, Side side, int qty);
-    virtual ~Order() = default;    // [CONSTRUCTORS] virtual destructor for safe polymorphic deletion
+    virtual ~Order() = default;
 
-    // [ENCAPSULATION] const getters
     int                id()       const { return id_; }
     const std::string& trader()   const { return trader_; }
     Side               side()     const { return side_; }
@@ -36,69 +36,66 @@ public:
     bool               isFilled() const { return quantity_ == 0; }
     void               fill(int qty)    { quantity_ -= qty; }
 
-    // [ABSTRACTION] pure virtual interface — every subtype must implement these
+    // Returns price in ticks.  MarketOrder returns 0 (no price).
+    virtual Price       price()    const = 0;
     virtual bool        isMarket() const = 0;
-    virtual double      price()    const = 0;
     virtual std::string type()     const = 0;
-    virtual std::string info()     const { return ""; }  // optional extra display info
+    virtual std::string info()     const { return ""; }
 
-    // [FRIEND] lets operator<< access private members
     friend std::ostream& operator<<(std::ostream& os, const Order& o);
 };
 
-// [POLYMORPHISM] operator overloading; type() / info() resolved at runtime (virtual dispatch)
+// Displays price as rupees (to_rupees conversion is display-only).
 std::ostream& operator<<(std::ostream& os, const Order& o);
 
 // ======================= LimitOrder =======================
 
-// [INHERITANCE] LimitOrder "is an" Order: executes only at the specified price or better.
 class LimitOrder : public Order {
 private:
-    double price_;
+    Price price_;           // stored in ticks
 
 public:
+    // User supplies price in rupees; constructor converts to ticks.
     LimitOrder(const std::string& trader, Side side, int qty, double price);
 
-    bool        isMarket() const override { return false; }  // [POLYMORPHISM]
-    double      price()    const override { return price_; }
+    Price       price()    const override { return price_; }
+    bool        isMarket() const override { return false; }
     std::string type()     const override { return "LIMIT"; }
 };
 
 // ======================= MarketOrder =======================
 
-// [INHERITANCE] MarketOrder "is an" Order: executes at the best available price immediately.
 class MarketOrder : public Order {
 public:
     MarketOrder(const std::string& trader, Side side, int qty);
 
+    Price       price()    const override { return 0; }
     bool        isMarket() const override { return true; }
-    double      price()    const override { return 0.0; }
     std::string type()     const override { return "MARKET"; }
 };
 
 // ======================= StopLossOrder =======================
 
-// [INHERITANCE] StopLossOrder "is an" Order: rests in a pending queue until the market price
-// crosses the trigger, then activates as a limit order — identical to Zerodha's SL order.
 class StopLossOrder : public Order {
 private:
-    double triggerPrice_;
-    double limitPrice_;
-    bool   triggered_ = false;
+    Price triggerPrice_;    // in ticks
+    Price limitPrice_;      // in ticks
+    bool  triggered_ = false;
 
 public:
+    // User supplies prices in rupees; constructor converts both to ticks.
     StopLossOrder(const std::string& trader, Side side, int qty,
                   double triggerPrice, double limitPrice);
 
-    bool        isMarket()    const override { return false; }
-    double      price()       const override { return limitPrice_; }
-    std::string type()        const override { return triggered_ ? "SL-ACTIVE" : "SL-PENDING"; }
-    std::string info()        const override;
+    Price       price()    const override { return limitPrice_; }
+    bool        isMarket() const override { return false; }
+    std::string type()     const override { return triggered_ ? "SL-ACTIVE" : "SL-PENDING"; }
+    std::string info()     const override;
 
-    double triggerPrice() const { return triggerPrice_; }
-    bool   isTriggered()  const { return triggered_; }
-    void   activate()           { triggered_ = true; }
+    Price triggerPrice() const { return triggerPrice_; }
+    bool  isTriggered()  const { return triggered_; }
+    void  activate()           { triggered_ = true; }
 
-    // [POLYMORPHISM] sell SL triggers when price drops; buy SL triggers when price rises
-    bool shouldTrigger(double lastPrice) const;
+    // Comparison is now exact integer arithmetic — no floating-point ambiguity.
+    bool shouldTrigger(Price lastPrice) const;
 };

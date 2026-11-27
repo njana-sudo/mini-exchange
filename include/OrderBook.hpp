@@ -1,9 +1,6 @@
 #pragma once
 // OrderBook.hpp - HOT PATH: price-time-priority matching engine.
-//                 Receives orders, matches them, parks resting orders, and
-//                 triggers stop-loss orders after each trade.
-//
-// OOP tags: [COMPOSITION] [POLYMORPHISM (template)] [DYNAMIC_CAST]
+// Map keys are Price (int64_t ticks) — no floating-point comparison.
 
 #include "Order.hpp"
 #include "Trade.hpp"
@@ -15,25 +12,20 @@
 #include <memory>
 #include <vector>
 
-// ======================= OrderBook =======================
-
-// [COMPOSITION] OrderBook owns its bids, asks, trades, and pending stop orders.
 class OrderBook {
 private:
-    // buy side: highest price first (std::greater); sell side: lowest price first (default).
-    // Each price level is a FIFO deque preserving time priority.
-    std::map<double, std::deque<std::shared_ptr<Order>>, std::greater<double>> bids_;
-    std::map<double, std::deque<std::shared_ptr<Order>>>                       asks_;
+    // Bids: highest tick first (std::greater).
+    // Asks: lowest tick first (default).
+    // Using integer Price keys eliminates all ULP/floating-point ambiguity.
+    std::map<Price, std::deque<std::shared_ptr<Order>>, std::greater<Price>> bids_;
+    std::map<Price, std::deque<std::shared_ptr<Order>>>                       asks_;
 
-    std::vector<Trade>                       trades_;
-    std::vector<std::shared_ptr<StopLossOrder>> stopOrders_;   // pending SL orders
+    std::vector<Trade>                          trades_;
+    std::vector<std::shared_ptr<StopLossOrder>> stopOrders_;
 
-    // [POLYMORPHISM] compile-time template: same matching logic for both sides of the book
     template <typename Book>
     void match(const std::shared_ptr<Order>& incoming, Book& opposite);
 
-    // [DYNAMIC_CAST] checks every pending SL after each trade; cascades if a triggered SL
-    // causes further trades that trigger more SL orders.
     void checkStopOrders();
 
 public:
