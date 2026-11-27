@@ -41,6 +41,24 @@ inline double to_rupees(Price ticks) {
     return static_cast<double>(ticks) / static_cast<double>(TICKS_PER_RUPEE);
 }
 
+// ======================= Exceptions =======================
+
+// [EXCEPTIONS] [INHERITANCE] custom exception derived from a standard one
+class InvalidOrderException : public std::runtime_error {
+public:
+    explicit InvalidOrderException(const std::string& msg) : std::runtime_error(msg) {}
+};
+
+// Validate user-supplied rupee price and convert to positive integer ticks.
+inline Price validateAndConvertPrice(double rupees, const char* label = "Price") {
+    if (!std::isfinite(rupees))
+        throw InvalidOrderException(std::string(label) + " must be finite");
+    Price ticks = to_ticks(rupees);
+    if (ticks <= 0)
+        throw InvalidOrderException(std::string(label) + " must be positive");
+    return ticks;
+}
+
 // ======================= Helpers =======================
 
 // format a time_t as "DD-Mon-YYYY"
@@ -49,11 +67,3 @@ inline std::string formatDate(std::time_t t) {
     std::strftime(buf, sizeof(buf), "%d-%b-%Y", std::localtime(&t));
     return buf;
 }
-
-// ======================= Exceptions =======================
-
-// [EXCEPTIONS] [INHERITANCE] custom exception derived from a standard one
-class InvalidOrderException : public std::runtime_error {
-public:
-    explicit InvalidOrderException(const std::string& msg) : std::runtime_error(msg) {}
-};

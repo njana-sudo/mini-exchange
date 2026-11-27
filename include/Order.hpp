@@ -35,12 +35,14 @@ public:
     int                quantity() const { return quantity_; }
     bool               isFilled() const { return quantity_ == 0; }
     void               fill(int qty)    { quantity_ -= qty; }
+    void               setQuantity(int qty);
 
     // Returns price in ticks.  MarketOrder returns 0 (no price).
     virtual Price       price()    const = 0;
     virtual bool        isMarket() const = 0;
     virtual std::string type()     const = 0;
     virtual std::string info()     const { return ""; }
+    virtual void        setPrice(Price newPrice);
 
     friend std::ostream& operator<<(std::ostream& os, const Order& o);
 };
@@ -61,6 +63,7 @@ public:
     Price       price()    const override { return price_; }
     bool        isMarket() const override { return false; }
     std::string type()     const override { return "LIMIT"; }
+    void        setPrice(Price newPrice) override;
 };
 
 // ======================= MarketOrder =======================
@@ -91,6 +94,7 @@ public:
     bool        isMarket() const override { return false; }
     std::string type()     const override { return triggered_ ? "SL-ACTIVE" : "SL-PENDING"; }
     std::string info()     const override;
+    void        setPrice(Price newPrice) override;
 
     Price triggerPrice() const { return triggerPrice_; }
     bool  isTriggered()  const { return triggered_; }

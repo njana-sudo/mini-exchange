@@ -3,6 +3,7 @@
 #include "Exchange.hpp"
 #include "Types.hpp"
 
+#include <iomanip>
 #include <iostream>
 #include <string>
 
@@ -26,26 +27,48 @@ void Exchange::registerTrader(std::unique_ptr<Trader> trader) {
     traders_[name]   = std::move(trader);
 }
 
-void Exchange::placeOrder(const std::string& trader, Side side, int qty, double price) {
+int Exchange::placeOrder(const std::string& trader, Side side, int qty, double price) {
     validate(trader, qty);
     auto order = std::make_shared<LimitOrder>(trader, side, qty, price);
+    int  id    = order->id();
     std::cout << "Placed  " << *order << "\n";
     book_.submit(order);
+    return id;
 }
 
-void Exchange::placeOrder(const std::string& trader, Side side, int qty) {
+int Exchange::placeOrder(const std::string& trader, Side side, int qty) {
     validate(trader, qty);
     auto order = std::make_shared<MarketOrder>(trader, side, qty);
+    int  id    = order->id();
     std::cout << "Placed  " << *order << "\n";
     book_.submit(order);
+    return id;
 }
 
-void Exchange::placeOrder(const std::string& trader, Side side, int qty,
-                           double triggerPrice, double limitPrice) {
+int Exchange::placeOrder(const std::string& trader, Side side, int qty,
+                         double triggerPrice, double limitPrice) {
     validate(trader, qty);
     auto order = std::make_shared<StopLossOrder>(trader, side, qty, triggerPrice, limitPrice);
+    int  id    = order->id();
     std::cout << "Placed  " << *order << "\n";
     book_.submit(order);
+    return id;
+}
+
+void Exchange::cancelOrder(const std::string& trader, int orderId) {
+    if (traders_.find(trader) == traders_.end())
+        throw InvalidOrderException("Unknown trader: " + trader);
+    book_.cancel(orderId, trader);
+    std::cout << "Cancelled #" << orderId << " by " << trader << "\n";
+}
+
+void Exchange::modifyOrder(const std::string& trader, int orderId, int newQty, double newPrice) {
+    validate(trader, newQty);
+    Price ticks = validateAndConvertPrice(newPrice, "Price");
+    book_.modify(orderId, trader, newQty, ticks);
+    std::cout << "Modified  #" << orderId << " -> qty " << newQty
+              << " @ " << std::fixed << std::setprecision(2) << to_rupees(ticks)
+              << " by " << trader << "\n";
 }
 
 void Exchange::traderReport(const std::string& name, int months) const {
@@ -54,8 +77,8 @@ void Exchange::traderReport(const std::string& name, int months) const {
         return;
     }
 
-    std::time_t now     = std::time(nullptr);
-    std::time_t cutoff  = (months > 0)
+    std::time_t now    = std::time(nullptr);
+    std::time_t cutoff = (months > 0)
         ? now - static_cast<std::time_t>(months) * 30 * 24 * 3600
         : 0;
 

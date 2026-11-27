@@ -3,21 +3,8 @@
 #include "Order.hpp"
 #include "Types.hpp"
 
-#include <cmath>
 #include <iomanip>
 #include <sstream>
-#include <stdexcept>
-
-namespace {
-Price validateAndConvertPrice(double rupees, const char* label) {
-    if (!std::isfinite(rupees))
-        throw InvalidOrderException(std::string(label) + " must be finite");
-    Price ticks = to_ticks(rupees);
-    if (ticks <= 0)
-        throw InvalidOrderException(std::string(label) + " must be positive");
-    return ticks;
-}
-}  // namespace
 
 // ======================= Order =======================
 
@@ -26,6 +13,15 @@ int Order::nextId = 1;
 Order::Order(const std::string& trader, Side side, int qty)
     : id_(nextId++), trader_(trader), side_(side), quantity_(qty) {
     if (qty <= 0) throw InvalidOrderException("Quantity must be positive");
+}
+
+void Order::setQuantity(int qty) {
+    if (qty <= 0) throw InvalidOrderException("Quantity must be positive");
+    quantity_ = qty;
+}
+
+void Order::setPrice(Price) {
+    throw InvalidOrderException("Cannot modify price on " + type() + " order");
 }
 
 std::ostream& operator<<(std::ostream& os, const Order& o) {
@@ -43,6 +39,11 @@ std::ostream& operator<<(std::ostream& os, const Order& o) {
 LimitOrder::LimitOrder(const std::string& trader, Side side, int qty, double price)
     : Order(trader, side, qty), price_(validateAndConvertPrice(price, "Price")) {}
 
+void LimitOrder::setPrice(Price newPrice) {
+    if (newPrice <= 0) throw InvalidOrderException("Price must be positive");
+    price_ = newPrice;
+}
+
 // ======================= MarketOrder =======================
 
 MarketOrder::MarketOrder(const std::string& trader, Side side, int qty)
@@ -55,6 +56,11 @@ StopLossOrder::StopLossOrder(const std::string& trader, Side side, int qty,
     : Order(trader, side, qty),
       triggerPrice_(validateAndConvertPrice(triggerPrice, "Trigger price")),
       limitPrice_(validateAndConvertPrice(limitPrice, "Limit price")) {}
+
+void StopLossOrder::setPrice(Price newPrice) {
+    if (newPrice <= 0) throw InvalidOrderException("Limit price must be positive");
+    limitPrice_ = newPrice;
+}
 
 std::string StopLossOrder::info() const {
     std::ostringstream oss;

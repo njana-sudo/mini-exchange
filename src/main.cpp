@@ -24,7 +24,7 @@ int main() {
     std::cout << "\n";
 
     // Build up resting limit orders
-    exchange.placeOrder("Asha",      Side::SELL, 50, 101.00);
+    int firstSellId = exchange.placeOrder("Asha",      Side::SELL, 50, 101.00);
     exchange.placeOrder("Ravi",      Side::SELL, 30, 102.00);
     exchange.placeOrder("AlphaFund", Side::BUY,  40,  99.00);
 
@@ -56,7 +56,17 @@ int main() {
     exchange.placeOrder("Ravi",      Side::BUY,  30, 103.00);
     exchange.placeOrder("AlphaFund", Side::SELL, 30, 103.00);
 
-    // Error handling: retail size limit and negative price
+    // Cancel & Modify demo (O(1) order lookup by ID)
+    std::cout << "\n--- Cancel & Modify demo ---\n";
+    int ashaBid = exchange.placeOrder("Asha", Side::BUY, 25, 95.00);
+    int raviBid = exchange.placeOrder("Ravi", Side::BUY, 15, 95.00);
+    int ashaSl  = exchange.placeOrder("Asha", Side::SELL, 10, 90.00, 89.50);
+    exchange.modifyOrder("Asha", ashaBid, 10, 95.00);   // size cut: keeps priority
+    exchange.cancelOrder("Ravi", raviBid);               // O(1) cancel resting limit
+    exchange.cancelOrder("Asha", ashaSl);                // O(1) cancel pending SL
+    exchange.book().print();
+
+    // Error handling: retail size limit, negative price, and invalid cancel/modify
     std::cout << "\n";
     try {
         exchange.placeOrder("Asha", Side::BUY, 500, 100.00);
@@ -68,6 +78,19 @@ int main() {
     } catch (const InvalidOrderException& e) {
         std::cout << "Rejected: " << e.what() << "\n";
     }
+    try {
+        exchange.cancelOrder("Ravi", ashaBid);           // wrong owner!
+    } catch (const InvalidOrderException& e) {
+        std::cout << "Rejected: " << e.what() << "\n";
+    }
+    try {
+        exchange.cancelOrder("Asha", firstSellId);       // already filled!
+    } catch (const InvalidOrderException& e) {
+        std::cout << "Rejected: " << e.what() << "\n";
+    }
+
+    // Clean up Asha's remaining resting bid before end of demo
+    exchange.cancelOrder("Asha", ashaBid);
 
     std::cout << "\n";
     printAll("Trades executed", exchange.book().trades());

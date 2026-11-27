@@ -27,10 +27,14 @@ public:
     void registerTrader(std::unique_ptr<Trader> trader);
 
     // [POLYMORPHISM] function overloading — same name, three distinct signatures
-    void placeOrder(const std::string& trader, Side side, int qty, double price);               // limit
-    void placeOrder(const std::string& trader, Side side, int qty);                            // market
-    void placeOrder(const std::string& trader, Side side, int qty,                             // stop-loss
-                    double triggerPrice, double limitPrice);
+    // Returns the assigned order ID so callers can cancel or modify the order later.
+    int placeOrder(const std::string& trader, Side side, int qty, double price);               // limit
+    int placeOrder(const std::string& trader, Side side, int qty);                            // market
+    int placeOrder(const std::string& trader, Side side, int qty,                             // stop-loss
+                   double triggerPrice, double limitPrice);
+
+    void cancelOrder(const std::string& trader, int orderId);
+    void modifyOrder(const std::string& trader, int orderId, int newQty, double newPrice);
 
     // [COMPOSITION] builds a TraderReport (cold path) over the last `months` (0 = all time)
     void traderReport(const std::string& name, int months = 0) const;
