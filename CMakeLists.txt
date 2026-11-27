@@ -19,7 +19,6 @@ else()
 endif()
 
 # ── Library: everything except main.cpp ───────────────────────────────────────
-# Building a static library lets us link it against tests later (next step).
 add_library(exchange_lib STATIC
     src/Order.cpp
     src/Trade.cpp
@@ -32,6 +31,27 @@ target_include_directories(exchange_lib PUBLIC include)
 # ── Executable ────────────────────────────────────────────────────────────────
 add_executable(exchange src/main.cpp)
 target_link_libraries(exchange PRIVATE exchange_lib)
+
+# ── Unit Tests (GoogleTest via FetchContent) ──────────────────────────────────
+option(BUILD_TESTING "Build unit tests" ON)
+if(BUILD_TESTING)
+    include(FetchContent)
+    FetchContent_Declare(
+        googletest
+        URL https://github.com/google/googletest/archive/refs/tags/v1.15.2.zip
+        DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+    )
+    set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
+    set(INSTALL_GTEST OFF CACHE BOOL "" FORCE)
+    FetchContent_MakeAvailable(googletest)
+
+    enable_testing()
+    add_executable(exchange_tests tests/exchange_test.cpp)
+    target_link_libraries(exchange_tests PRIVATE exchange_lib GTest::gtest_main)
+
+    include(GoogleTest)
+    gtest_discover_tests(exchange_tests)
+endif()
 
 # ── Useful info at configure time ─────────────────────────────────────────────
 message(STATUS "Build type : ${CMAKE_BUILD_TYPE}")

@@ -217,6 +217,25 @@ void OrderBook::modify(int orderId, const std::string& trader, int newQty, Price
     checkStopOrders();
 }
 
+// ======================= queries =======================
+
+int OrderBook::remainingQuantity(int orderId) const {
+    auto it = orderIndex_.find(orderId);
+    if (it == orderIndex_.end()) return 0;
+    const OrderLocation& loc = it->second;
+    return loc.isStopLoss ? (*loc.stopIt)->quantity() : (*loc.bookIt)->quantity();
+}
+
+std::optional<Price> OrderBook::bestBid() const {
+    if (bids_.empty()) return std::nullopt;
+    return bids_.begin()->first;
+}
+
+std::optional<Price> OrderBook::bestAsk() const {
+    if (asks_.empty()) return std::nullopt;
+    return asks_.begin()->first;
+}
+
 // ======================= print =======================
 
 void OrderBook::print() const {

@@ -71,11 +71,9 @@ void Exchange::modifyOrder(const std::string& trader, int orderId, int newQty, d
               << " by " << trader << "\n";
 }
 
-void Exchange::traderReport(const std::string& name, int months) const {
-    if (traders_.find(name) == traders_.end()) {
-        std::cout << "Unknown trader: " << name << "\n";
-        return;
-    }
+TraderReport Exchange::buildTraderReport(const std::string& name, int months) const {
+    if (traders_.find(name) == traders_.end())
+        throw InvalidOrderException("Unknown trader: " + name);
 
     std::time_t now    = std::time(nullptr);
     std::time_t cutoff = (months > 0)
@@ -90,7 +88,15 @@ void Exchange::traderReport(const std::string& name, int months) const {
         if (trade.seller() == name)
             report.addSell(trade.sellOrderId(), trade.price(), trade.quantity(), trade.timestamp());
     }
-    std::cout << report;
+    return report;
+}
+
+void Exchange::traderReport(const std::string& name, int months) const {
+    if (traders_.find(name) == traders_.end()) {
+        std::cout << "Unknown trader: " << name << "\n";
+        return;
+    }
+    std::cout << buildTraderReport(name, months);
 }
 
 void Exchange::listTraders() const {

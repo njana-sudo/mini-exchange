@@ -41,7 +41,8 @@ public:
     void modifyOrder(const std::string& trader, int orderId, int newQty, double newPrice);
 
     // [COMPOSITION] builds a TraderReport (cold path) over the last `months` (0 = all time)
-    void traderReport(const std::string& name, int months = 0) const;
+    TraderReport buildTraderReport(const std::string& name, int months = 0) const;
+    void         traderReport(const std::string& name, int months = 0) const;
 
     void listTraders() const;
 

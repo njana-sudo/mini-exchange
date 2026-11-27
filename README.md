@@ -108,17 +108,18 @@ Each step is reviewed for correctness, speed, and behaviour under load before th
 - [x] **Self-trade prevention** — configurable `CANCEL_OLDEST` / `CANCEL_NEWEST` modes; prevents self-matches and crossed books without adding overhead to non-crossing orders.
 
 ### Phase 2 — Prove it correct
-- [ ] **Unit tests** (Google Test via CMake `FetchContent`) — price-time priority, partial fills, SL cascade, cancel-then-fill race, self-trade rejection, replay identity.
+- [x] **Unit tests** (Google Test via CMake `FetchContent`) — 19 tests covering integer tick drift, price-time priority, partial fills, SL cascade, O(1) cancel/modify, STP modes, and P&L reports.
 - [ ] **Append-only order log** — every submitted order written to a binary log before matching. Replaying the log must produce bit-identical trades (determinism test run in CI).
 
 ### Phase 3 — Make it fast
-- [ ] **Benchmark harness** — submit N orders in a tight loop, measure throughput (orders/sec) and per-order latency (p50, p95, p99 in microseconds) on this machine. Publish real numbers, not marketing claims.
-- [ ] **Hot-path optimisation review** — after baseline numbers: compare `std::map` price levels vs. flat sorted arrays, measure allocation cost per order, eliminate copies in the critical path. Only change what the profiler shows matters.
-- [ ] **Multiple symbols** — one `OrderBook` per symbol; symbols are independent so they can eventually run on separate cores.
+- [ ] **Decouple I/O & POD hot-path structs** — remove `std::cout` and heap-allocated `std::string`s from `OrderBook` / `Trade`; use integer `TraderId` (`uint32_t`) on the hot path and keep string names at the cold boundary.
+- [ ] **Benchmark harness** — pace orders at fixed arrival rates (avoiding coordinated omission) plus adversarial cancel/replace burst traces; report throughput (orders/sec) and tail latency (**p50, p99, p99.9** in microseconds) on this machine.
+- [ ] **Arena pool & flat price levels** — replace `std::shared_ptr` + `std::list` + `std::map` with a contiguous order pool using `uint32_t` intrusive FIFO indices, an open-addressed/flat ID lookup table, and a flat price array with bitmask (`__builtin_ctzll`) for $O(1)$ best-bid/ask jumps.
+- [ ] **Multiple symbols & sharded threading** — one lock-free single-threaded `OrderBook` shard per symbol, fed by cache-line-aligned (`alignas(64)`) SPSC/MPSC ring buffers with acquire/release memory ordering.
 
 ### Phase 4 — Make it a server
-- [ ] **TCP gateway** — accept order submissions and return trade confirmations over a socket. Use Boost.Asio or `epoll` directly. This makes the engine reachable from any client.
-- [ ] **WebSocket event stream** — after every trade, push a small JSON event (last price, quantity, trader, timestamp) to all connected clients. Latency from match to browser render should be measurable and shown on the dashboard.
+- [ ] **TCP gateway** — accept order submissions and return trade confirmations over a socket (Boost.Asio / `epoll` on Linux).
+- [ ] **Batched WebSocket event stream** — coalesce trade/book updates into batched JSON frames (avoiding per-trade wakeups under burst load) and measure end-to-end match-to-browser latency on the dashboard.
 
 ### Phase 5 — Make it visual (hackathon demo layer)
 - [ ] **Python market simulator** — generates realistic synthetic order flow (Poisson arrivals, Gaussian price drift) at configurable rates; connects to the TCP gateway. Used to stress-test the engine and populate the dashboard with live data.

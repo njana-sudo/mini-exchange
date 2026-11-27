@@ -12,6 +12,7 @@
 #include <list>
 #include <map>
 #include <memory>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -61,7 +62,11 @@ public:
     void cancel(int orderId, const std::string& trader);
     void modify(int orderId, const std::string& trader, int newQty, Price newPrice);
 
-    bool hasOrder(int orderId) const { return orderIndex_.find(orderId) != orderIndex_.end(); }
+    bool                      hasOrder(int orderId) const { return orderIndex_.find(orderId) != orderIndex_.end(); }
+    size_t                    openOrderCount() const { return orderIndex_.size(); }
+    int                       remainingQuantity(int orderId) const;
+    std::optional<Price>      bestBid() const;
+    std::optional<Price>      bestAsk() const;
     const std::vector<Trade>& trades() const { return trades_; }
 
     void print() const;
