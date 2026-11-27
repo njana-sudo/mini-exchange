@@ -1,221 +1,93 @@
-# Mini Stock Exchange (C++17)
+# Mini Exchange
 
-A stock exchange matching engine demonstrating core OOP and software-engineering concepts in C++17.
+A limit order book and matching engine written in C++17.
+
+Orders are matched by **price-time priority** — the standard used by real exchanges. The engine handles limit orders, market orders, and stop-loss orders; records every trade with a timestamp; and reports each trader's realized P&L on demand.
+
+---
+
+## How it works
+
+```
+  placeOrder()
+       │
+       ▼
+  ┌─────────────┐    validate    ┌──────────────┐
+  │  Exchange   │ ────────────►  │  OrderBook   │  hot path
+  │  (facade)   │                │  (matcher)   │
+  └─────────────┘                └──────┬───────┘
+       │                                │ emits Trade records
+       │  traderReport()                ▼
+       │                         ┌──────────────┐
+       └────────────────────────►│ TraderReport │  cold path
+                                 │  (analytics) │
+                                 └──────────────┘
+```
+
+**Hot path** (`OrderBook`): receives an order, walks the opposite side of the book by price then time, fills as much as possible, parks the remainder, and checks whether any pending stop-loss orders should activate.
+
+**Cold path** (`TraderReport`): scans the trade log, filters by trader and time window, and computes average buy/sell prices, net position, and realized P&L using the average-cost method.
+
+---
 
 ## Features
-- **Limit, Market, and Stop-Loss orders** matched by price-time priority (best price first, then oldest first).
-- **Stop-loss cascade:** a triggered SL can cause trades that trigger further SL orders.
-- **Trader reports:** per-trader buy/sell history, net position, and realized P&L over the last *N* months (average-cost method, like Zerodha Console).
-- **Validation:** unknown traders, oversized orders, negative prices all throw typed exceptions.
+
+- **Price-time priority matching** — best price wins; ties broken by submission time
+- **Limit, market, and stop-loss orders** — SL orders sit pending until the last traded price crosses the trigger, then activate as limit orders; cascades are handled
+- **Trade history with timestamps** — every execution is recorded
+- **Per-trader P&L reports** — quantity, price, value, net position, and realized P&L over the last *N* months
+
+---
 
 ## Project structure
 
 ```
 mini-exchange/
-├── CMakeLists.txt          # CMake build (Release / Debug, static lib + executable)
+├── CMakeLists.txt
 ├── include/
-│   ├── Types.hpp           # Side enum, formatDate helper, InvalidOrderException
+│   ├── Types.hpp           # Side enum, formatDate, InvalidOrderException
 │   ├── Order.hpp           # Order (abstract), LimitOrder, MarketOrder, StopLossOrder
-│   ├── Trade.hpp           # Immutable trade record with timestamp
+│   ├── Trade.hpp           # Immutable trade record
 │   ├── Trader.hpp          # Trader (abstract), RetailTrader, InstitutionalTrader
-│   ├── TraderReport.hpp    # Cold-path analytics: P&L and trade history
+│   ├── TraderReport.hpp    # Cold-path analytics
 │   ├── OrderBook.hpp       # Hot-path matching engine
 │   └── Exchange.hpp        # Top-level facade
-├── src/
-│   ├── Order.cpp
-│   ├── Trade.cpp
-│   ├── TraderReport.cpp
-│   ├── OrderBook.cpp
-│   ├── Exchange.cpp
-│   └── main.cpp            # Demo / entry point
-└── README.md
+└── src/
+    ├── Order.cpp
+    ├── Trade.cpp
+    ├── TraderReport.cpp
+    ├── OrderBook.cpp
+    ├── Exchange.cpp
+    └── main.cpp
 ```
 
-## Class relationships
+---
 
-```mermaid
-classDiagram
-    direction TB
+## Build
 
-    class Order {
-        <<abstract>>
-        -static int nextId
-        -int id_
-        -string trader_
-        -Side side_
-        -int quantity_
-        +id() int
-        +trader() string
-        +side() Side
-        +quantity() int
-        +isFilled() bool
-        +fill(int qty)
-        +isMarket() bool*
-        +price() double*
-        +type() string*
-        +info() string
-    }
+**Requirements:** CMake ≥ 3.16, g++ or clang++ (C++17), Ninja
 
-    class LimitOrder {
-        -double price_
-        +isMarket() bool
-        +price() double
-        +type() string
-    }
-
-    class MarketOrder {
-        +isMarket() bool
-        +price() double
-        +type() string
-    }
-
-    class StopLossOrder {
-        -double triggerPrice_
-        -double limitPrice_
-        -bool triggered_
-        +triggerPrice() double
-        +isTriggered() bool
-        +activate()
-        +shouldTrigger(double) bool
-        +info() string
-    }
-
-    class Trader {
-        <<abstract>>
-        #string name_
-        +name() string
-        +maxOrderSize() int*
-        +category() string*
-    }
-
-    class RetailTrader {
-        +maxOrderSize() int
-        +category() string
-    }
-
-    class InstitutionalTrader {
-        +maxOrderSize() int
-        +category() string
-    }
-
-    class Trade {
-        -int buyOrderId_
-        -int sellOrderId_
-        -string buyer_
-        -string seller_
-        -double price_
-        -int quantity_
-        -time_t timestamp_
-        +buyOrderId() int
-        +sellOrderId() int
-        +buyer() string
-        +seller() string
-        +price() double
-        +quantity() int
-        +timestamp() time_t
-    }
-
-    class TraderReport {
-        -string name_
-        -int months_
-        -vector~Entry~ buys_
-        -vector~Entry~ sells_
-        +addBuy(int, double, int, time_t)
-        +addSell(int, double, int, time_t)
-        +totalBought() int
-        +totalSold() int
-        +avgBuyPrice() double
-        +avgSellPrice() double
-        +netPosition() int
-        +realizedPnL() double
-    }
-
-    class OrderBook {
-        -map bids_
-        -map asks_
-        -vector~Trade~ trades_
-        -vector~StopLossOrder~ stopOrders_
-        -match(Order, Book)
-        -checkStopOrders()
-        +submit(Order)
-        +trades() vector~Trade~
-        +print()
-    }
-
-    class Exchange {
-        -OrderBook book_
-        -map~Trader~ traders_
-        -validate(string, int)
-        +registerTrader(Trader)
-        +placeOrder() ×3 overloads
-        +traderReport(string, int)
-        +listTraders()
-        +book() OrderBook
-    }
-
-    class InvalidOrderException {
-        +what() string
-    }
-
-    Order <|-- LimitOrder : inherits
-    Order <|-- MarketOrder : inherits
-    Order <|-- StopLossOrder : inherits
-    Trader <|-- RetailTrader : inherits
-    Trader <|-- InstitutionalTrader : inherits
-    runtime_error <|-- InvalidOrderException : inherits
-
-    Exchange *-- OrderBook : composition
-    Exchange *-- Trader : composition
-    Exchange ..> TraderReport : creates
-    OrderBook *-- Trade : composition
-    OrderBook o-- Order : aggregation
-    OrderBook o-- StopLossOrder : aggregation
-```
-
-## OOP concepts used
-| Concept | Where |
-|---|---|
-| Encapsulation | `Order`, `Trade`, `OrderBook`, `TraderReport`: private data with const getters |
-| Abstraction | Abstract classes `Order` and `Trader` (pure virtual functions) |
-| Inheritance | `LimitOrder`/`MarketOrder`/`StopLossOrder` from `Order`; `RetailTrader`/`InstitutionalTrader` from `Trader` |
-| Polymorphism (runtime) | Virtual functions called via base pointers (`type()`, `info()`, `maxOrderSize()`) |
-| Polymorphism (compile time) | Function overloading (`placeOrder` × 3), operator overloading (`<<`), templates (`match`, `printAll`) |
-| Constructors / destructors | Constructor overloading, initializer lists, virtual destructors |
-| Static members | `Order::nextId` |
-| Friend functions | `operator<<` for `Order`, `Trade`, and `TraderReport` |
-| Composition | `Exchange` owns an `OrderBook`, its traders, and builds `TraderReport`s |
-| Exception handling | `InvalidOrderException` |
-| Dynamic cast | `dynamic_pointer_cast` to identify `StopLossOrder` at runtime |
-| Nested struct | `Entry` inside `TraderReport` groups trade line-item fields |
-
-## Build and run
-
-### Prerequisites
-- CMake ≥ 3.16
-- g++ (C++17) or clang++
-- Ninja (recommended) or Make
-
-### Configure and build (Release)
 ```bash
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build
 ./build/exchange        # Windows: .\build\exchange.exe
 ```
 
-### Debug build (with sanitizers-ready flags)
+**Debug build:**
 ```bash
 cmake -S . -B build-dbg -G Ninja -DCMAKE_BUILD_TYPE=Debug
 cmake --build build-dbg
 ```
 
-### Legacy single-file build (still works)
-```bash
-g++ -std=c++17 -Wall -Wextra -o exchange main.cpp   # from v1.0-single-file tag
-```
+---
 
-## Possible next steps
-- Order cancellation and modification
-- Multiple symbols (`RELIANCE`, `TCS`, …)
-- Unit tests (Google Test via CMake `FetchContent`)
-- Performance benchmark (flat arrays, fixed-point prices)
-- WebSocket/HTTP API layer (Python or Go client)
+## Roadmap
+
+- [ ] **Integer prices** — replace `double` map keys with integer ticks to eliminate floating-point comparison issues; a real design decision with measurable impact
+- [ ] **Order cancellation and modification**
+- [ ] **Self-trade prevention**
+- [ ] **Unit tests** (Google Test via CMake `FetchContent`) — price-time priority, partial fills, SL cascade, rejections
+- [ ] **Benchmark** — orders/second and latency percentiles (p50, p99) on the matching loop
+- [ ] **Multiple symbols**
+- [ ] **Order log and replay** — write every order to a log and replay it to reproduce identical trades (determinism test)
+- [ ] **TCP gateway** — accept orders over a socket so external clients can connect
