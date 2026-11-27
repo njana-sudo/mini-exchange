@@ -1,14 +1,35 @@
 # Mini Stock Exchange (C++17)
 
-A small order-matching engine that demonstrates core object-oriented programming concepts in C++.
+A stock exchange matching engine demonstrating core OOP and software-engineering concepts in C++17.
 
-## What it does
-- Traders place **limit**, **market**, and **stop-loss** orders (buy or sell).
-- Orders are matched by **price-time priority**: best price first, and the oldest order first at the same price.
-- **Stop-loss orders** stay pending until the last traded price crosses a trigger level, then activate as limit orders — just like Zerodha's SL orders.  Triggered stop-losses can cascade (one trigger causes trades that trigger another).
-- Unmatched limit orders rest in the order book; trades are recorded and printed.
-- **Trader reports** (`traderReport(name, months)`) show the quantity, price, and value of all stocks bought and sold by a user over the last *N* months, along with net position and realized P&L.
-- Invalid orders (bad price, unknown trader, size above the trader's limit) are rejected with exceptions.
+## Features
+- **Limit, Market, and Stop-Loss orders** matched by price-time priority (best price first, then oldest first).
+- **Stop-loss cascade:** a triggered SL can cause trades that trigger further SL orders.
+- **Trader reports:** per-trader buy/sell history, net position, and realized P&L over the last *N* months (average-cost method, like Zerodha Console).
+- **Validation:** unknown traders, oversized orders, negative prices all throw typed exceptions.
+
+## Project structure
+
+```
+mini-exchange/
+├── CMakeLists.txt          # CMake build (Release / Debug, static lib + executable)
+├── include/
+│   ├── Types.hpp           # Side enum, formatDate helper, InvalidOrderException
+│   ├── Order.hpp           # Order (abstract), LimitOrder, MarketOrder, StopLossOrder
+│   ├── Trade.hpp           # Immutable trade record with timestamp
+│   ├── Trader.hpp          # Trader (abstract), RetailTrader, InstitutionalTrader
+│   ├── TraderReport.hpp    # Cold-path analytics: P&L and trade history
+│   ├── OrderBook.hpp       # Hot-path matching engine
+│   └── Exchange.hpp        # Top-level facade
+├── src/
+│   ├── Order.cpp
+│   ├── Trade.cpp
+│   ├── TraderReport.cpp
+│   ├── OrderBook.cpp
+│   ├── Exchange.cpp
+│   └── main.cpp            # Demo / entry point
+└── README.md
+```
 
 ## Class relationships
 
@@ -168,13 +189,33 @@ classDiagram
 | Nested struct | `Entry` inside `TraderReport` groups trade line-item fields |
 
 ## Build and run
+
+### Prerequisites
+- CMake ≥ 3.16
+- g++ (C++17) or clang++
+- Ninja (recommended) or Make
+
+### Configure and build (Release)
 ```bash
-g++ -std=c++17 -Wall -Wextra -o exchange main.cpp
-./exchange        # on Windows: exchange.exe
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+cmake --build build
+./build/exchange        # Windows: .\build\exchange.exe
+```
+
+### Debug build (with sanitizers-ready flags)
+```bash
+cmake -S . -B build-dbg -G Ninja -DCMAKE_BUILD_TYPE=Debug
+cmake --build build-dbg
+```
+
+### Legacy single-file build (still works)
+```bash
+g++ -std=c++17 -Wall -Wextra -o exchange main.cpp   # from v1.0-single-file tag
 ```
 
 ## Possible next steps
 - Order cancellation and modification
-- Multiple symbols
-- Unit tests and a performance benchmark
-- Split into headers and source files
+- Multiple symbols (`RELIANCE`, `TCS`, …)
+- Unit tests (Google Test via CMake `FetchContent`)
+- Performance benchmark (flat arrays, fixed-point prices)
+- WebSocket/HTTP API layer (Python or Go client)
