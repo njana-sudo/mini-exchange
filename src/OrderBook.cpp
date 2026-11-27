@@ -10,7 +10,7 @@
 // ======================= match (private template) =======================
 
 template <typename Book>
-void OrderBook::match(const std::shared_ptr<Order>& incoming, Book& opposite) {
+bool OrderBook::match(const std::shared_ptr<Order>& incoming, Book& opposite) {
     while (!incoming->isFilled() && !opposite.empty()) {
         auto  level      = opposite.begin();
         Price levelPrice = level->first;
@@ -24,7 +24,24 @@ void OrderBook::match(const std::shared_ptr<Order>& incoming, Book& opposite) {
 
         auto& queue   = level->second;
         auto  resting = queue.front();
-        int   qty     = std::min(incoming->quantity(), resting->quantity());
+
+        // Self-Trade Prevention: never match a trader against their own resting order
+        if (resting->trader() == incoming->trader()) {
+            if (stpMode_ == StpMode::CANCEL_OLDEST) {
+                std::cout << "  >>> STP: cancelled resting #" << resting->id()
+                          << " (self-trade prevented for " << incoming->trader() << ")\n";
+                orderIndex_.erase(resting->id());
+                queue.pop_front();
+                if (queue.empty()) opposite.erase(level);
+                continue;
+            }
+            std::cout << "  >>> STP: cancelled incoming #" << incoming->id()
+                      << " remainder (" << incoming->quantity()
+                      << " shares, self-trade prevented for " << incoming->trader() << ")\n";
+            return true;
+        }
+
+        int qty = std::min(incoming->quantity(), resting->quantity());
         incoming->fill(qty);
         resting ->fill(qty);
 
@@ -40,12 +57,13 @@ void OrderBook::match(const std::shared_ptr<Order>& incoming, Book& opposite) {
         }
         if (queue.empty()) opposite.erase(level);
     }
+    return false;
 }
 
 // explicit instantiations for both bid and ask maps
-template void OrderBook::match(const std::shared_ptr<Order>&,
+template bool OrderBook::match(const std::shared_ptr<Order>&,
     std::map<Price, OrderBook::OrderQueue, std::greater<Price>>&);
-template void OrderBook::match(const std::shared_ptr<Order>&,
+template bool OrderBook::match(const std::shared_ptr<Order>&,
     std::map<Price, OrderBook::OrderQueue>&);
 
 // ======================= parkOrder / executeOrder =======================
@@ -64,8 +82,11 @@ void OrderBook::parkOrder(const std::shared_ptr<Order>& order) {
 }
 
 void OrderBook::executeOrder(const std::shared_ptr<Order>& order) {
-    if (order->side() == Side::BUY) match(order, asks_);
-    else                            match(order, bids_);
+    bool stpCancelled = (order->side() == Side::BUY)
+                        ? match(order, asks_)
+                        : match(order, bids_);
+
+    if (stpCancelled) return;
 
     if (!order->isFilled()) {
         if (order->isMarket()) {

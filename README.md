@@ -49,6 +49,7 @@ The goal: build an engine that is **measurably fast, provably correct, and trans
 - **Price-time priority matching** — best price wins; ties broken by submission time
 - **Limit, market, and stop-loss orders** — SL orders sit pending until the last traded price crosses the trigger; cascades handled
 - **O(1) order cancellation and modification** — cancel resting or pending SL orders by ID with ownership checks; in-place quantity cuts preserve FIFO time priority while price/size increases re-enter matching
+- **Self-trade prevention (STP)** — configurable `CANCEL_OLDEST` (cancel passive resting order) or `CANCEL_NEWEST` (cancel incoming remainder) prevents a trader from matching against themselves or crossing the book
 - **Trade history with timestamps** — every execution recorded in an append-only log
 - **Per-trader P&L reports** — quantity, price, value, net position, realized P&L over *N* months
 - **Deterministic replay** — reprocessing the order log produces bit-identical trades (provable correctness)
@@ -104,7 +105,7 @@ Each step is reviewed for correctness, speed, and behaviour under load before th
 ### Phase 1 — Make it correct
 - [x] **Integer tick prices** — replace `double` map keys with `int64_t` ticks; eliminates floating-point comparison bugs and makes the order book a true integer structure. Real exchanges do not use floats.
 - [x] **Order cancellation and modification** — `O(1)` lookup by order ID via a parallel `unordered_map` with iterator-stable `std::list` price queues; ownership-checked and priority-aware.
-- [ ] **Self-trade prevention** — reject or cancel-and-replace any incoming order that would match against the same trader's own resting order.
+- [x] **Self-trade prevention** — configurable `CANCEL_OLDEST` / `CANCEL_NEWEST` modes; prevents self-matches and crossed books without adding overhead to non-crossing orders.
 
 ### Phase 2 — Prove it correct
 - [ ] **Unit tests** (Google Test via CMake `FetchContent`) — price-time priority, partial fills, SL cascade, cancel-then-fill race, self-trade rejection, replay identity.

@@ -38,9 +38,11 @@ private:
     std::vector<Trade>                       trades_;
     StopQueue                                stopOrders_;
     std::unordered_map<int, OrderLocation>   orderIndex_;  // O(1) lookup by orderId
+    StpMode                                  stpMode_;
 
+    // Returns true if the incoming order's remainder was cancelled by STP.
     template <typename Book>
-    void match(const std::shared_ptr<Order>& incoming, Book& opposite);
+    bool match(const std::shared_ptr<Order>& incoming, Book& opposite);
 
     void parkOrder(const std::shared_ptr<Order>& order);
     void executeOrder(const std::shared_ptr<Order>& order);
@@ -50,6 +52,11 @@ private:
     std::shared_ptr<Order> removeOrder(int orderId, const std::string& trader);
 
 public:
+    explicit OrderBook(StpMode stpMode = StpMode::CANCEL_OLDEST) : stpMode_(stpMode) {}
+
+    StpMode stpMode() const { return stpMode_; }
+    void    setStpMode(StpMode mode) { stpMode_ = mode; }
+
     void submit(const std::shared_ptr<Order>& order);
     void cancel(int orderId, const std::string& trader);
     void modify(int orderId, const std::string& trader, int newQty, Price newPrice);

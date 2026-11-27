@@ -13,6 +13,13 @@ enum class Side { BUY, SELL };
 
 inline std::string toString(Side s) { return s == Side::BUY ? "BUY" : "SELL"; }
 
+// Self-Trade Prevention (STP) policy when an incoming order crosses
+// a resting order belonging to the same trader.
+enum class StpMode {
+    CANCEL_OLDEST,   // cancel the resting order and continue matching (Cancel Passive)
+    CANCEL_NEWEST    // cancel the incoming remainder immediately (Cancel Active)
+};
+
 // ======================= Integer price (tick) system =======================
 //
 // Real exchanges never use floating-point prices.  Floating-point comparison

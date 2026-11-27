@@ -56,14 +56,21 @@ int main() {
     exchange.placeOrder("Ravi",      Side::BUY,  30, 103.00);
     exchange.placeOrder("AlphaFund", Side::SELL, 30, 103.00);
 
-    // Cancel & Modify demo (O(1) order lookup by ID)
-    std::cout << "\n--- Cancel & Modify demo ---\n";
+    // Cancel, Modify & Self-Trade Prevention demo
+    std::cout << "\n--- Cancel, Modify & STP demo ---\n";
     int ashaBid = exchange.placeOrder("Asha", Side::BUY, 25, 95.00);
     int raviBid = exchange.placeOrder("Ravi", Side::BUY, 15, 95.00);
     int ashaSl  = exchange.placeOrder("Asha", Side::SELL, 10, 90.00, 89.50);
     exchange.modifyOrder("Asha", ashaBid, 10, 95.00);   // size cut: keeps priority
     exchange.cancelOrder("Ravi", raviBid);               // O(1) cancel resting limit
     exchange.cancelOrder("Asha", ashaSl);                // O(1) cancel pending SL
+
+    // Demonstrate CANCEL_NEWEST STP mode
+    exchange.setStpMode(StpMode::CANCEL_NEWEST);
+    int raviAsk = exchange.placeOrder("Ravi", Side::SELL, 10, 105.00);
+    exchange.placeOrder("Ravi", Side::BUY, 10, 105.00);  // incoming cancelled by STP
+    exchange.cancelOrder("Ravi", raviAsk);
+    exchange.setStpMode(StpMode::CANCEL_OLDEST);
     exchange.book().print();
 
     // Error handling: retail size limit, negative price, and invalid cancel/modify

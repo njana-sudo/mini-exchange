@@ -24,7 +24,11 @@ private:
     void validate(const std::string& traderName, int qty) const;
 
 public:
+    explicit Exchange(StpMode stpMode = StpMode::CANCEL_OLDEST) : book_(stpMode) {}
+
     void registerTrader(std::unique_ptr<Trader> trader);
+    void setStpMode(StpMode mode) { book_.setStpMode(mode); }
+    StpMode stpMode() const       { return book_.stpMode(); }
 
     // [POLYMORPHISM] function overloading — same name, three distinct signatures
     // Returns the assigned order ID so callers can cancel or modify the order later.
