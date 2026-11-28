@@ -25,12 +25,17 @@ private:
 
     std::vector<Entry> buys_;
     std::vector<Entry> sells_;
+    int64_t            continuousPnLTickShares_ = 0;
+    bool               hasContinuousPnL_        = false;
 
 public:
     TraderReport(const std::string& name, int months);
 
     void addBuy (OrderId orderId, Price price, Quantity qty, std::time_t ts);
     void addSell(OrderId orderId, Price price, Quantity qty, std::time_t ts);
+
+    // Sets realized P&L computed by the continuous TraderLedger (accurate across windows).
+    void setContinuousRealizedTickShares(int64_t tickShares);
 
     bool     empty()            const { return buys_.empty() && sells_.empty(); }
     Quantity totalBought()      const;

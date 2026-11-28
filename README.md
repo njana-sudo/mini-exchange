@@ -38,8 +38,9 @@ Orders are matched by **price-time priority** using exact integer ticks (`int64_
 - **$O(1)$ cancel & priority-aware modify** — stored map + list iterators allow constant-time removal; same-price quantity cuts preserve queue position while price/size increases re-enter matching
 - **Self-trade prevention (STP)** — `CANCEL_OLDEST` (cancel resting order) or `CANCEL_NEWEST` (cancel incoming remainder)
 - **Deterministic timestamps & non-burning IDs** — injected `Clock` and per-exchange `uint64_t` order IDs assigned only after validation succeeds
-- **Per-trader P&L reports** — buy/sell history, average prices, net position, and realized P&L over the last *N* months
-- **Unit & differential tests** — GoogleTest suite verifying invariants (`OrderBook::checkInvariants()`) and randomized parity against a naive $O(N)$ reference book
+- **Per-trader P&L reports** — buy/sell history, average prices, net position, and continuous integer-tick realized P&L (indexed per trader, accurate across time windows)
+- **Append-only order journal & deterministic replay** — binary command log (`OrderJournal`) replays an entire session to reproduce bit-identical trades, timestamps, order book state, and ledgers
+- **Unit & differential tests** — GoogleTest suite verifying invariants (`OrderBook::checkInvariants()`), deterministic replay, and randomized parity against a naive $O(N)$ reference book
 
 ---
 
@@ -53,13 +54,17 @@ mini-exchange/
 │   ├── Order.hpp           # Order (abstract), LimitOrder, MarketOrder, StopLossOrder
 │   ├── Trade.hpp           # Immutable trade record with deterministic timestamp
 │   ├── Trader.hpp          # Trader (abstract), RetailTrader, InstitutionalTrader
+│   ├── TraderLedger.hpp    # O(1) continuous integer-tick position & P&L tracker
 │   ├── TraderReport.hpp    # Cold-path analytics
+│   ├── OrderJournal.hpp    # Binary append-only command log for deterministic replay
 │   ├── OrderBook.hpp       # Matching engine + invariant checker
 │   └── Exchange.hpp        # Top-level facade
 ├── src/
 │   ├── Order.cpp
 │   ├── Trade.cpp
+│   ├── TraderLedger.cpp
 │   ├── TraderReport.cpp
+│   ├── OrderJournal.cpp
 │   ├── OrderBook.cpp
 │   ├── Exchange.cpp
 │   └── main.cpp            # Demo CLI
@@ -100,8 +105,7 @@ ctest --test-dir build-dbg --output-on-failure
 ## Known limitations (current stage)
 
 - **Single symbol** — one `OrderBook` instance per `Exchange`; multi-symbol partitioning comes in Phase 3
-- **In-memory only** — no disk persistence or WAL replay yet (Phase 2 next step)
-- **Window-local P&L** — `TraderReport` computes cost basis from trades inside the requested window; a continuous per-trader ledger is planned
+- **No continuous SQL analytics store yet** — trade/command durability is via the binary replay journal; indexed SQL/OLAP queries are optional for the cold path later
 - **Continuous matching only** — no opening/closing auction or IOC/FOK/post-only time-in-force flags yet
 
 ---
@@ -128,7 +132,7 @@ Each step is reviewed for correctness, speed, and behaviour under load before th
 
 ### Phase 2 — Prove it correct
 - [x] **Unit & differential tests** (GoogleTest) — edge cases, `checkInvariants()`, and randomized differential testing against a naive $O(N)$ reference book
-- [ ] **Continuous trader ledger & append-only order log** — track integer-tick realized P&L continuously across windows; log every input command to disk and replay for bit-identical trades
+- [x] **Continuous trader ledger & append-only order log** — track integer-tick realized P&L continuously across windows; log every input command to disk and replay for bit-identical trades
 
 ### Phase 3 — Make it fast
 - [ ] **Decouple I/O & POD hot-path structs** — replace `std::cout` with an event listener, use integer `TraderId` (`uint32_t`) and result codes instead of exceptions on the hot path
@@ -138,6 +142,7 @@ Each step is reviewed for correctness, speed, and behaviour under load before th
 
 ### Phase 4 — Make it a server
 - [ ] **TCP gateway** — accept order submissions and return trade confirmations over a socket
+- [ ] **Session auth & TOTP 2FA** — RFC 6238 6-digit TOTP login at the gateway edge issuing session tokens (zero hot-path auth overhead)
 - [ ] **Batched WebSocket event stream** — coalesce market data / trade updates into batched frames for downstream visualization
 
 ### Phase 5 — Make it visual (demo layer)

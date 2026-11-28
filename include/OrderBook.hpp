@@ -72,8 +72,10 @@ public:
     void    setStpMode(StpMode mode) { stpMode_ = mode; }
 
     void submit(const std::shared_ptr<Order>& order);
+    void submit(const std::shared_ptr<Order>& order, std::time_t now);
     void cancel(OrderId orderId, const std::string& trader);
     void modify(OrderId orderId, const std::string& trader, Quantity newQty, Price newPrice);
+    void modify(OrderId orderId, const std::string& trader, Quantity newQty, Price newPrice, std::time_t now);
 
     bool                       hasOrder(OrderId orderId) const { return orderIndex_.find(orderId) != orderIndex_.end(); }
     size_t                     openOrderCount() const { return orderIndex_.size(); }

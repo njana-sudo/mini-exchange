@@ -34,8 +34,19 @@ std::ostream& operator<<(std::ostream& os, const Order& o) {
 
 // ======================= LimitOrder =======================
 
+LimitOrder::LimitOrder(TicksTag, OrderId id, const std::string& trader,
+                       Side side, Quantity qty, Price priceTicks)
+    : Order(id, trader, side, qty), price_(priceTicks) {
+    if (priceTicks <= 0) throw InvalidOrderException("Price must be positive");
+}
+
 LimitOrder::LimitOrder(OrderId id, const std::string& trader, Side side, Quantity qty, double price)
     : Order(id, trader, side, qty), price_(validateAndConvertPrice(price, "Price")) {}
+
+std::shared_ptr<LimitOrder> LimitOrder::fromTicks(OrderId id, const std::string& trader,
+                                                  Side side, Quantity qty, Price priceTicks) {
+    return std::shared_ptr<LimitOrder>(new LimitOrder(TicksTag{}, id, trader, side, qty, priceTicks));
+}
 
 void LimitOrder::setPrice(Price newPrice) {
     if (newPrice <= 0) throw InvalidOrderException("Price must be positive");
@@ -49,11 +60,25 @@ MarketOrder::MarketOrder(OrderId id, const std::string& trader, Side side, Quant
 
 // ======================= StopLossOrder =======================
 
+StopLossOrder::StopLossOrder(TicksTag, OrderId id, const std::string& trader,
+                             Side side, Quantity qty, Price triggerTicks, Price limitTicks)
+    : Order(id, trader, side, qty), triggerPrice_(triggerTicks), limitPrice_(limitTicks) {
+    if (triggerTicks <= 0) throw InvalidOrderException("Trigger price must be positive");
+    if (limitTicks   <= 0) throw InvalidOrderException("Limit price must be positive");
+}
+
 StopLossOrder::StopLossOrder(OrderId id, const std::string& trader, Side side, Quantity qty,
                              double triggerPrice, double limitPrice)
     : Order(id, trader, side, qty),
       triggerPrice_(validateAndConvertPrice(triggerPrice, "Trigger price")),
       limitPrice_(validateAndConvertPrice(limitPrice, "Limit price")) {}
+
+std::shared_ptr<StopLossOrder> StopLossOrder::fromTicks(OrderId id, const std::string& trader,
+                                                        Side side, Quantity qty,
+                                                        Price triggerTicks, Price limitTicks) {
+    return std::shared_ptr<StopLossOrder>(
+        new StopLossOrder(TicksTag{}, id, trader, side, qty, triggerTicks, limitTicks));
+}
 
 void StopLossOrder::setPrice(Price newPrice) {
     if (newPrice <= 0) throw InvalidOrderException("Limit price must be positive");

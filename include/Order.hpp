@@ -10,6 +10,7 @@
 
 #include <iomanip>
 #include <iostream>
+#include <memory>
 #include <sstream>
 #include <string>
 
@@ -51,8 +52,13 @@ class LimitOrder : public Order {
 private:
     Price price_;
 
+    struct TicksTag {};
+    LimitOrder(TicksTag, OrderId id, const std::string& trader, Side side, Quantity qty, Price priceTicks);
+
 public:
     LimitOrder(OrderId id, const std::string& trader, Side side, Quantity qty, double price);
+    static std::shared_ptr<LimitOrder> fromTicks(OrderId id, const std::string& trader,
+                                                 Side side, Quantity qty, Price priceTicks);
 
     Price       price()    const override { return price_; }
     bool        isMarket() const override { return false; }
@@ -79,9 +85,16 @@ private:
     Price limitPrice_;
     bool  triggered_ = false;
 
+    struct TicksTag {};
+    StopLossOrder(TicksTag, OrderId id, const std::string& trader, Side side, Quantity qty,
+                  Price triggerTicks, Price limitTicks);
+
 public:
     StopLossOrder(OrderId id, const std::string& trader, Side side, Quantity qty,
                   double triggerPrice, double limitPrice);
+    static std::shared_ptr<StopLossOrder> fromTicks(OrderId id, const std::string& trader,
+                                                    Side side, Quantity qty,
+                                                    Price triggerTicks, Price limitTicks);
 
     Price       price()    const override { return limitPrice_; }
     bool        isMarket() const override { return false; }

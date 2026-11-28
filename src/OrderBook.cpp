@@ -203,6 +203,10 @@ std::shared_ptr<Order> OrderBook::removeOrder(OrderId orderId, const std::string
 // ======================= submit / cancel / modify =======================
 
 void OrderBook::submit(const std::shared_ptr<Order>& order) {
+    submit(order, clock_());
+}
+
+void OrderBook::submit(const std::shared_ptr<Order>& order, std::time_t now) {
     auto sl = std::dynamic_pointer_cast<StopLossOrder>(order);
     if (sl && !sl->isTriggered()) {
         if (lastTradePrice_.has_value() && sl->shouldTrigger(*lastTradePrice_)) {
@@ -213,8 +217,7 @@ void OrderBook::submit(const std::shared_ptr<Order>& order) {
         return;
     }
 
-    std::time_t now          = clock_();
-    size_t      tradesBefore = trades_.size();
+    size_t tradesBefore = trades_.size();
     executeOrder(order, now);
     if (trades_.size() > tradesBefore) {
         checkStopOrders(now);
@@ -226,6 +229,11 @@ void OrderBook::cancel(OrderId orderId, const std::string& trader) {
 }
 
 void OrderBook::modify(OrderId orderId, const std::string& trader, Quantity newQty, Price newPrice) {
+    modify(orderId, trader, newQty, newPrice, clock_());
+}
+
+void OrderBook::modify(OrderId orderId, const std::string& trader,
+                       Quantity newQty, Price newPrice, std::time_t now) {
     if (newQty <= 0)   throw InvalidOrderException("Quantity must be positive");
     if (newPrice <= 0) throw InvalidOrderException("Price must be positive");
 
@@ -264,8 +272,7 @@ void OrderBook::modify(OrderId orderId, const std::string& trader, Quantity newQ
     order->setQuantity(newQty);
     order->setPrice(newPrice);
 
-    std::time_t now          = clock_();
-    size_t      tradesBefore = trades_.size();
+    size_t tradesBefore = trades_.size();
     executeOrder(order, now);
     if (trades_.size() > tradesBefore) {
         checkStopOrders(now);

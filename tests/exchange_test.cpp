@@ -8,6 +8,8 @@
 
 #include <gtest/gtest.h>
 #include <algorithm>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <limits>
 #include <memory>
@@ -784,6 +786,137 @@ TEST(DifferentialTest, MatchesNaiveBookInCancelOldestMode) {
 TEST(DifferentialTest, MatchesNaiveBookInCancelNewestMode) {
     runDifferentialTrace(7u,    StpMode::CANCEL_NEWEST, 1000);
     runDifferentialTrace(2026u, StpMode::CANCEL_NEWEST, 1000);
+}
+
+// ======================= 8. Continuous TraderLedger & Journal Replay =======================
+
+TEST(TraderReportWindowTest, PreservesRealizedPnLAcrossWindowBoundary) {
+    std::time_t fakeNow = 1700000000;
+    Exchange timedEx(StpMode::CANCEL_OLDEST, [&fakeNow]() { return fakeNow; });
+    timedEx.registerTrader(std::make_unique<RetailTrader>("Asha"));
+    timedEx.registerTrader(std::make_unique<InstitutionalTrader>("AlphaFund"));
+
+    // Day 0: AlphaFund opens long 10 @ 100.00
+    timedEx.placeOrder("Asha",      Side::SELL, 10, 100.00);
+    timedEx.placeOrder("AlphaFund", Side::BUY,  10, 100.00);
+
+    // Advance 65 days (beyond 1-month window)
+    fakeNow += static_cast<std::time_t>(65) * 24 * 3600;
+
+    // Day 65: AlphaFund closes long 10 @ 125.00 -> must realize +250.00 even in 1-month window
+    timedEx.placeOrder("Asha",      Side::BUY,  10, 125.00);
+    timedEx.placeOrder("AlphaFund", Side::SELL, 10, 125.00);
+
+    TraderReport oneMonth = timedEx.buildTraderReport("AlphaFund", 1);
+    EXPECT_EQ(oneMonth.totalBought(), 0);
+    EXPECT_EQ(oneMonth.totalSold(),   10);
+    EXPECT_DOUBLE_EQ(oneMonth.realizedPnL(), 250.00);
+    EXPECT_EQ(timedEx.ledger("AlphaFund").netPosition(), 0);
+}
+
+TEST(TraderLedgerTest, HandlesShortAndPositionFlips) {
+    TraderLedger ledger;
+    // Buy 10 @ 100 -> long 10 @ 100
+    EXPECT_EQ(ledger.recordFill(0, Side::BUY, to_ticks(100.00), 10), 0);
+    EXPECT_EQ(ledger.netPosition(), 10);
+    EXPECT_DOUBLE_EQ(ledger.avgEntryPrice(), 100.00);
+
+    // Sell 25 @ 110 -> closes 10 (+100.00 P&L = 10 shares * ₹10/share), opens short 15 @ 110
+    EXPECT_EQ(ledger.recordFill(1, Side::SELL, to_ticks(110.00), 25), to_ticks(10.00) * 10);
+    EXPECT_EQ(ledger.netPosition(), -15);
+    EXPECT_DOUBLE_EQ(ledger.avgEntryPrice(), 110.00);
+    EXPECT_DOUBLE_EQ(ledger.realizedPnL(), 100.00);
+
+    // Cover 10 @ 102 -> closes 10 short (+80.00 P&L), leaves short 5 @ 110
+    ledger.recordFill(2, Side::BUY, to_ticks(102.00), 10);
+    EXPECT_EQ(ledger.netPosition(), -5);
+    EXPECT_DOUBLE_EQ(ledger.avgEntryPrice(), 110.00);
+    EXPECT_DOUBLE_EQ(ledger.realizedPnL(), 180.00);
+}
+
+TEST(JournalReplayTest, ReplaysMixedSessionBitIdentically) {
+    struct TempFileGuard {
+        std::filesystem::path path;
+        ~TempFileGuard() { std::error_code ec; std::filesystem::remove(path, ec); }
+    } guard{std::filesystem::temp_directory_path() / "mini_exchange_replay_test.bin"};
+
+    std::time_t fakeNow = 1700000000;
+    Exchange live(StpMode::CANCEL_OLDEST, [&fakeNow]() { return fakeNow; });
+    live.enableJournal(guard.path.string(), true, true);
+
+    live.registerTrader(std::make_unique<RetailTrader>("Asha"));
+    live.registerTrader(std::make_unique<RetailTrader>("Ravi"));
+    live.registerTrader(std::make_unique<InstitutionalTrader>("AlphaFund"));
+
+    fakeNow += 10;
+    OrderId s1 = live.placeOrder("Asha", Side::SELL, 50, 101.00);
+    live.placeOrder("Ravi", Side::SELL, 30, 102.00);
+    live.placeOrder("AlphaFund", Side::BUY, 40, 99.00);
+    live.placeOrder("Asha", Side::SELL, 20, 98.00, 97.50);
+
+    fakeNow += 60;
+    live.placeOrder("AlphaFund", Side::BUY, 70, 102.00);
+    live.placeOrder("AlphaFund", Side::BUY, 30, 98.00);
+    live.placeOrder("Ravi", Side::SELL, 60, 97.00);  // triggers Asha SL
+    live.placeOrder("AlphaFund", Side::BUY, 10);     // market sweep
+
+    // Rejected commands must NOT corrupt the journal
+    EXPECT_THROW(live.placeOrder("Asha", Side::BUY, 500, 100.00), InvalidOrderException);
+    EXPECT_THROW(live.cancelOrder("Ravi", s1), InvalidOrderException);
+
+    fakeNow += 120;
+    OrderId b1 = live.placeOrder("Asha", Side::BUY, 25, 95.00);
+    OrderId b2 = live.placeOrder("Ravi", Side::BUY, 15, 95.00);
+    live.modifyOrder("Asha", b1, 10, 95.00);
+    live.cancelOrder("Ravi", b2);
+
+    live.setStpMode(StpMode::CANCEL_NEWEST);
+    OrderId rAsk = live.placeOrder("Ravi", Side::SELL, 10, 105.00);
+    live.placeOrder("Ravi", Side::BUY, 10, 105.00);  // STP cancels incoming
+    (void)rAsk;
+    live.closeJournal();
+
+    // Replay from scratch into a fresh Exchange
+    Exchange replayed = Exchange::replayFromJournal(guard.path.string());
+    replayed.book().checkInvariants();
+
+    EXPECT_EQ(replayed.stpMode(), live.stpMode());
+    EXPECT_EQ(replayed.book().openOrderCount(), live.book().openOrderCount());
+    EXPECT_EQ(replayed.book().bestBid(),        live.book().bestBid());
+    EXPECT_EQ(replayed.book().bestAsk(),        live.book().bestAsk());
+    EXPECT_EQ(replayed.book().lastTradePrice(), live.book().lastTradePrice());
+
+    const auto& lt = live.book().trades();
+    const auto& rt = replayed.book().trades();
+    ASSERT_EQ(rt.size(), lt.size());
+    for (size_t i = 0; i < lt.size(); ++i) {
+        EXPECT_EQ(rt[i].buyOrderId(),  lt[i].buyOrderId());
+        EXPECT_EQ(rt[i].sellOrderId(), lt[i].sellOrderId());
+        EXPECT_EQ(rt[i].buyer(),       lt[i].buyer());
+        EXPECT_EQ(rt[i].seller(),      lt[i].seller());
+        EXPECT_EQ(rt[i].price(),       lt[i].price());
+        EXPECT_EQ(rt[i].quantity(),    lt[i].quantity());
+        EXPECT_EQ(rt[i].timestamp(),   lt[i].timestamp());
+    }
+
+    for (const char* name : {"Asha", "Ravi", "AlphaFund"}) {
+        EXPECT_EQ(replayed.ledger(name).netPosition(),        live.ledger(name).netPosition());
+        EXPECT_EQ(replayed.ledger(name).realizedTickShares(), live.ledger(name).realizedTickShares());
+        EXPECT_DOUBLE_EQ(replayed.ledger(name).avgEntryPrice(), live.ledger(name).avgEntryPrice());
+    }
+}
+
+TEST(JournalReplayTest, RejectsCorruptJournalHeader) {
+    struct TempFileGuard {
+        std::filesystem::path path;
+        ~TempFileGuard() { std::error_code ec; std::filesystem::remove(path, ec); }
+    } guard{std::filesystem::temp_directory_path() / "mini_exchange_bad_journal.bin"};
+
+    {
+        std::ofstream bad(guard.path, std::ios::binary);
+        bad << "NOTALOG!";
+    }
+    EXPECT_THROW(Exchange::replayFromJournal(guard.path.string()), std::runtime_error);
 }
 
 }  // namespace

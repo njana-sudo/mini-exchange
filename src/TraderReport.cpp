@@ -17,6 +17,11 @@ void TraderReport::addSell(OrderId orderId, Price price, Quantity qty, std::time
     sells_.push_back({orderId, price, qty, ts});
 }
 
+void TraderReport::setContinuousRealizedTickShares(int64_t tickShares) {
+    continuousPnLTickShares_ = tickShares;
+    hasContinuousPnL_        = true;
+}
+
 Quantity TraderReport::totalBought() const {
     Quantity t = 0; for (const auto& e : buys_)  t += e.quantity; return t;
 }
@@ -42,6 +47,9 @@ double TraderReport::avgSellPrice() const {
 Quantity TraderReport::netPosition() const { return totalBought() - totalSold(); }
 
 double TraderReport::realizedPnL() const {
+    if (hasContinuousPnL_) {
+        return static_cast<double>(continuousPnLTickShares_) / static_cast<double>(TICKS_PER_RUPEE);
+    }
     Quantity matched = std::min(totalBought(), totalSold());
     if (matched == 0) return 0.0;
     return static_cast<double>(matched) * (avgSellPrice() - avgBuyPrice());
@@ -83,19 +91,23 @@ std::ostream& operator<<(std::ostream& os, const TraderReport& r) {
            << " | Avg price: " << r.avgSellPrice() << "\n\n";
     }
 
-    os << "Net position: ";
+    os << "Net position (period): ";
     Quantity net = r.netPosition();
     if      (net > 0) os << "+" << net << " shares (long)";
     else if (net < 0) os <<        net << " shares (short)";
     else              os << "0 (flat)";
 
-    os << "\nRealized P&L: ";
+    os << "\nRealized P&L (period): ";
     double pnl = r.realizedPnL();
     if (pnl >= 0) os << "+";
     os << pnl;
-    Quantity matched = std::min(r.totalBought(), r.totalSold());
-    if (matched > 0)
-        os << "  (on " << matched << " matched shares, avg-cost method)";
+    if (r.hasContinuousPnL_) {
+        os << "  (continuous avg-cost ledger)";
+    } else {
+        Quantity matched = std::min(r.totalBought(), r.totalSold());
+        if (matched > 0)
+            os << "  (on " << matched << " matched shares, avg-cost method)";
+    }
 
     os << "\n================================================\n";
     return os;

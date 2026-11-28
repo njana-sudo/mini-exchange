@@ -59,7 +59,9 @@ endif()
 add_library(exchange_lib STATIC
     src/Order.cpp
     src/Trade.cpp
+    src/TraderLedger.cpp
     src/TraderReport.cpp
+    src/OrderJournal.cpp
     src/OrderBook.cpp
     src/Exchange.cpp
 )
